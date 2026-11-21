@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bakery-pos"
+version = "0.1.0"
+description = "Offline-first bakery point-of-sale foundation"
+requires-python = ">=3.12"
+dependencies = [
+    "Flask>=3.1,<4",
+    "python-dotenv>=1.0,<2",
+    "waitress>=3.0,<4",
+]
+
+[project.optional-dependencies]
+sheets = [
+    "google-api-python-client>=2.160,<3",
+    "google-auth>=2.40,<3",
+]
+
+[project.scripts]
+bakery-pos = "bakery_pos.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

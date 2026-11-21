@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#7a4b2a">
+    <title>Bakery POS</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+    <script src="assets/js/data-service.js" defer></script>
+    <script src="assets/js/app.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Bakery counter</p>
+          <h1>Bakery POS</h1>
+        </div>
+        <button id="sync-button" class="secondary-button" type="button" hidden>
+          Sync Google Sheets
+        </button>
+      </header>
+
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+      <form id="access-form" class="access-panel" hidden>
+        <label for="access-token">Staff access token</label>
+        <div class="inline-form">
+          <input id="access-token" type="password" autocomplete="current-password" required>
+          <button type="submit">Connect</button>
+        </div>
+      </form>
+
+      <div class="layout">
+        <section class="panel">
+          <h2>New order</h2>
+          <form id="order-form">
+            <label for="customer">Customer name</label>
+            <input id="customer" name="customer" autocomplete="name" maxlength="120">
+
+            <label for="order-type">Order type</label>
+            <select id="order-type" name="orderType">
+              <option value="walk_in">Walk-in</option>
+              <option value="advance">Advance</option>
+              <option value="custom_cake">Custom cake</option>
+            </select>
+
+            <label for="order-channel">Order channel</label>
+            <select id="order-channel" name="orderChannel">
+              <option value="walk_in">Walk-in</option>
+              <option value="grab">Grab delivery</option>
+              <option value="other">Other</option>
+            </select>
+
+            <label for="pickup-at">Pickup or delivery time</label>
+            <input id="pickup-at" name="pickupAt" type="datetime-local">
+
+            <label for="item-name">Bakery item</label>
+            <input id="item-name" name="itemName" maxlength="160" required>
+
+            <div class="field-row">
+              <div>
+                <label for="quantity">Quantity</label>
+                <input id="quantity" name="quantity" type="number" min="1" step="1" value="1" required>
+              </div>
+              <div>
+                <label for="unit-price">Unit price</label>
+                <input id="unit-price" name="unitPrice" type="number" min="0" step="0.01" value="0" required>
+              </div>
+            </div>
+
+            <label for="currency">Currency</label>
+            <select id="currency" name="currency">
+              <option value="USD">USD</option>
+              <option value="KHR">KHR</option>
+            </select>
+
+            <label for="notes">Order notes</label>
+            <textarea id="notes" name="notes" rows="3" maxlength="2000"></textarea>
+
+            <button type="submit">Save order</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <h2>Orders</h2>
+            <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
+          </div>
+          <div id="orders" class="orders-list" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

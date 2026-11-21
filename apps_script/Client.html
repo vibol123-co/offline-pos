@@ -1,0 +1,1390 @@
+<script>
+  const State = { data: null, cart: [], activeScreen: "dashboard", loading: false, orderCurrency: "USD" };
+  const CURRENCY_EXPONENTS = { USD: 2, KHR: 0 };
+  const DATABASE_NAME = "bakery-pos-offline";
+  let databasePromise;
+  let refreshTimer;
+  let customerLookupTimer;
+  let customerLookupSequence = 0;
+  let matchedCustomer;
+
+  const DataService = Object.freeze({
+    async getAppData() {
+      try {
+        const data = await callServer_("getAppData", []);
+        try {
+          await storeCache_(data);
+        } catch (cacheError) {
+          window.dispatchEvent(new CustomEvent("bakery:cache-error", {
+            detail: { message: cacheError.message }
+          }));
+        }
+        return data;
+      } catch (error) {
+        if (!navigator.onLine) {
+          const cached = await readCache_();
+          if (cached) {
+            cached.offline = true;
+            return cached;
+          }
+        }
+        throw error;
+      }
+    },
+    getReports(payload) {
+      return callServer_("getReports", [payload]);
+    },
+    getPriceHistory(itemId) {
+      return callServer_("getPriceHistory", [itemId]);
+    },
+    findCustomerByPhone(phone) {
+      return callServer_("findCustomerByPhone", [phone]);
+    },
+    createOrder(payload, preview) {
+      return mutate_("createOrder", [payload], preview);
+    },
+    updateOrderStatus(orderId, status) {
+      return mutate_("updateOrderStatus", [orderId, status]);
+    },
+    recordPayment(orderId, payload) {
+      return mutate_("recordPayment", [orderId, payload]);
+    },
+    createProduct(payload) {
+      return mutate_("createProduct", [payload]);
+    },
+    createAddOn(payload) {
+      return mutate_("createAddOn", [payload]);
+    },
+    createSupplier(payload) {
+      return mutate_("createSupplier", [payload]);
+    },
+    createInventoryItem(payload) {
+      return mutate_("createInventoryItem", [payload]);
+    },
+    recordSupplierPriceQuote(payload) {
+      return mutate_("recordSupplierPriceQuote", [payload]);
+    },
+    receiveStock(payload) {
+      return mutate_("receiveStock", [payload]);
+    },
+    adjustStock(payload) {
+      return mutate_("adjustStock", [payload]);
+    },
+    updateSettings(payload) {
+      return mutate_("updateSettings", [payload]);
+    },
+    createBackup() {
+      return callServer_("createDailyDriveBackup", []);
+    },
+    async getPendingActions() {
+      const db = await openDatabase_();
+      return transactionRequest_(db, "outbox", "readonly", function(store) {
+        return store.getAll();
+      });
+    },
+    async flushPendingActions() {
+      if (!navigator.onLine) return;
+      const actions = (await this.getPendingActions()).sort(function(a, b) {
+        return a.created_at.localeCompare(b.created_at);
+      });
+      for (const action of actions) {
+        try {
+          await callServer_(action.method, action.args);
+          await removeQueuedAction_(action.request_id);
+          window.dispatchEvent(new CustomEvent("bakery:queue-updated"));
+        } catch (error) {
+          window.dispatchEvent(new CustomEvent("bakery:queue-error", {
+            detail: { requestId: action.request_id, message: error.message }
+          }));
+          break;
+        }
+      }
+    }
+  });
+
+  function callServer_(method, args) {
+    return new Promise(function(resolve, reject) {
+      try {
+        const runner = google.script.run
+          .withSuccessHandler(resolve)
+          .withFailureHandler(function(error) {
+            reject(new Error(error && error.message ? error.message : "The request failed."));
+          });
+        runner[method].apply(runner, args);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async function mutate_(method, args, preview) {
+    const requestId = createRequestId_();
+    const callArgs = args.concat([requestId]);
+    try {
+      return await callServer_(method, callArgs);
+    } catch (error) {
+      if (!navigator.onLine) {
+        const action = {
+          request_id: requestId,
+          method: method,
+          args: callArgs,
+          preview: preview || null,
+          created_at: new Date().toISOString()
+        };
+        await putQueuedAction_(action);
+        window.dispatchEvent(new CustomEvent("bakery:queue-updated"));
+        return { queued: true, request_id: requestId };
+      }
+      throw error;
+    }
+  }
+
+  function createRequestId_() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return "req_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+  }
+
+  function openDatabase_() {
+    if (databasePromise) return databasePromise;
+    databasePromise = new Promise(function(resolve, reject) {
+      const request = indexedDB.open(DATABASE_NAME, 1);
+      request.onupgradeneeded = function() {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("outbox")) {
+          db.createObjectStore("outbox", { keyPath: "request_id" });
+        }
+        if (!db.objectStoreNames.contains("cache")) {
+          db.createObjectStore("cache", { keyPath: "id" });
+        }
+      };
+      request.onsuccess = function() { resolve(request.result); };
+      request.onerror = function() { reject(request.error); };
+    });
+    return databasePromise;
+  }
+
+  function transactionRequest_(db, storeName, mode, action) {
+    return new Promise(function(resolve, reject) {
+      const transaction = db.transaction(storeName, mode);
+      const request = action(transaction.objectStore(storeName));
+      request.onsuccess = function() { resolve(request.result); };
+      request.onerror = function() { reject(request.error); };
+      transaction.onabort = function() { reject(transaction.error); };
+    });
+  }
+
+  async function putQueuedAction_(action) {
+    const db = await openDatabase_();
+    return transactionRequest_(db, "outbox", "readwrite", function(store) {
+      return store.put(action);
+    });
+  }
+
+  async function removeQueuedAction_(requestId) {
+    const db = await openDatabase_();
+    return transactionRequest_(db, "outbox", "readwrite", function(store) {
+      return store.delete(requestId);
+    });
+  }
+
+  async function storeCache_(data) {
+    const db = await openDatabase_();
+    return transactionRequest_(db, "cache", "readwrite", function(store) {
+      return store.put({ id: "latest", data: data, saved_at: new Date().toISOString() });
+    });
+  }
+
+  async function readCache_() {
+    const db = await openDatabase_();
+    const record = await transactionRequest_(db, "cache", "readonly", function(store) {
+      return store.get("latest");
+    });
+    return record ? record.data : null;
+  }
+
+  function byId(id) { return document.getElementById(id); }
+  function text(element, value) { element.textContent = value == null ? "" : String(value); }
+  function element(tag, className, value) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined) node.textContent = value;
+    return node;
+  }
+
+  function showNotice(message, isError) {
+    const notice = byId("notice");
+    text(notice, message);
+    notice.classList.toggle("error", Boolean(isError));
+  }
+
+  function moneyFromMinor(amountMinor, currency) {
+    const exponent = CURRENCY_EXPONENTS[currency] || 0;
+    const amount = Number(amountMinor || 0) / Math.pow(10, exponent);
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent
+    }).format(amount);
+  }
+
+  function moneyFromMajor(value, currency) {
+    const exponent = CURRENCY_EXPONENTS[currency] || 0;
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent
+    }).format(Number(value || 0));
+  }
+
+  function formatQuantity(milli) {
+    return (Number(milli || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 3 });
+  }
+
+  function setConnectionState(offline) {
+    const status = byId("connection-status");
+    status.classList.toggle("offline", offline);
+    text(status, offline ? "Offline / cached data" : "Connected to shop data");
+    byId("offline-banner").hidden = !offline;
+  }
+
+  async function refreshData(silent) {
+    if (State.loading) return;
+    State.loading = true;
+    try {
+      State.data = await DataService.getAppData();
+      setConnectionState(Boolean(State.data.offline) || !navigator.onLine);
+      renderAll();
+      if (!silent) showNotice(State.data.offline ? "Showing the last saved device snapshot." : "Data refreshed.");
+      await updateQueueStatus();
+    } catch (error) {
+      setConnectionState(true);
+      showNotice(error.message, true);
+    } finally {
+      State.loading = false;
+    }
+  }
+
+  function showScreen(name) {
+    State.activeScreen = name;
+    document.querySelectorAll(".screen").forEach(function(screen) {
+      screen.hidden = screen.id !== "screen-" + name;
+    });
+    document.querySelectorAll(".nav-button").forEach(function(button) {
+      button.classList.toggle("active", button.dataset.screen === name);
+    });
+    if (name === "stock" && State.data) {
+      loadPriceHistory();
+    }
+  }
+
+  function renderAll() {
+    if (!State.data) return;
+    renderDashboard();
+    renderOrders();
+    renderProducts();
+    renderAddOns();
+    renderSuppliers();
+    renderStock();
+    renderSettings();
+    populateSelects();
+    if (!State.cart.length) {
+      State.orderCurrency = State.data.settings.default_currency || "USD";
+      byId("order-currency").value = State.orderCurrency;
+    }
+    renderItemCards();
+    renderCart();
+    renderOrderTotals();
+  }
+
+  function renderDashboard() {
+    const today = new Date().toDateString();
+    const orders = State.data.orders || [];
+    const todays = orders.filter(function(order) {
+      return new Date(order.created_at).toDateString() === today && order.status !== "cancelled";
+    });
+    const completedToday = todays.filter(function(order) { return order.status === "completed"; });
+    byId("kpi-orders").textContent = String(todays.length);
+    ["USD", "KHR"].forEach(function(currency) {
+      const sum = completedToday.filter(function(order) { return order.currency === currency; })
+        .reduce(function(total, order) { return total + Number(order.total_minor || 0); }, 0);
+      text(byId(currency === "USD" ? "kpi-sales-usd" : "kpi-sales-khr"), moneyFromMinor(sum, currency));
+    });
+    const lowStock = (State.data.stock || []).filter(function(item) { return item.is_low; });
+    text(byId("kpi-low-stock"), String(lowStock.length));
+    const attention = orders.filter(function(order) {
+      return ["new", "preparing", "ready"].includes(order.status);
+    }).slice(0, 8);
+    renderSimpleRows(byId("dashboard-orders"), attention.map(function(order) {
+      return order.order_number + " · " + (order.customer_name || "Walk-in") + " · " + order.status;
+    }), "No orders need attention.");
+    renderSimpleRows(byId("dashboard-stock"), lowStock.slice(0, 8).map(function(item) {
+      return item.name + " · " + formatQuantity(item.on_hand_milli) + " " + item.base_unit;
+    }), "No low-stock items.");
+  }
+
+  function renderSimpleRows(container, rows, emptyMessage) {
+    container.replaceChildren();
+    if (!rows.length) {
+      container.append(element("p", "muted", emptyMessage));
+      return;
+    }
+    rows.forEach(function(value) { container.append(element("div", "compact-row", value)); });
+  }
+
+  function renderOrders() {
+    const container = byId("orders-list");
+    if (!container) return;
+    container.replaceChildren();
+    const search = (byId("orders-search").value || "").trim().toLowerCase();
+    const selectedStatus = byId("orders-status").value;
+    const queued = getQueuedOrderPreviews();
+    const all = (State.data.orders || []).filter(function(order) {
+      const searchText = [order.order_number, order.customer_name, order.customer_phone]
+        .join(" ").toLowerCase();
+      return (!search || searchText.includes(search)) &&
+        (!selectedStatus || order.status === selectedStatus);
+    }).concat(queued);
+    if (!all.length) {
+      container.append(element("p", "muted", "No matching orders."));
+      return;
+    }
+    all.sort(function(left, right) {
+      return String(right.created_at).localeCompare(String(left.created_at));
+    }).forEach(function(order) {
+      container.append(renderOrderCard(order));
+    });
+  }
+
+  function renderOrderCard(order) {
+    const card = element("article", "order-card");
+    const heading = element("div", "order-heading");
+    heading.append(element("h3", "", order.customer_name || "Walk-in customer"));
+    heading.append(element("span", "status status-" + order.status, order.status.replaceAll("_", " ")));
+    card.append(heading);
+    card.append(element("p", "order-meta",
+      (order.order_number || "Pending sync") + " · " + order.order_channel + " · " + order.fulfillment_method +
+      (order.pickup_at ? " · " + new Date(order.pickup_at).toLocaleString() : "") +
+      (order.location ? " · " + order.location : "")));
+    const list = element("ul", "order-items");
+    (order.items || []).forEach(function(item) {
+      list.append(element("li", "", item.name_snapshot + (item.variant ? " · " + item.variant : "") + " × " + item.quantity));
+    });
+    card.append(list);
+    card.append(element("p", "order-total",
+      moneyFromMinor(order.total_minor || 0, order.currency) +
+      " · paid " + moneyFromMinor(order.amount_paid_minor || 0, order.currency) +
+      " · due " + moneyFromMinor(order.balance_due_minor || order.total_minor || 0, order.currency)));
+    const actions = element("div", "order-actions");
+    if (order.request_id) {
+      actions.append(element("span", "muted", "Waiting to sync"));
+    } else {
+      const next = { new: "preparing", preparing: "ready", ready: "completed" }[order.status];
+      if (next) {
+        const label = { preparing: "Start preparing", ready: "Mark ready", completed: "Complete" }[next];
+        const statusButton = element("button", "", label);
+        statusButton.type = "button";
+        statusButton.addEventListener("click", function() {
+          runAction(async function() {
+            await DataService.updateOrderStatus(order.id, next);
+            await refreshData(true);
+            showNotice("Order status updated.");
+          });
+        });
+        actions.append(statusButton);
+      }
+      if (!["completed", "cancelled"].includes(order.status)) {
+        const paymentButton = element("button", "button-muted", "Record payment");
+        paymentButton.type = "button";
+        paymentButton.addEventListener("click", function() { openPaymentDialog(order); });
+        actions.append(paymentButton);
+        const cancel = element("button", "cancel-button", "Cancel order");
+        cancel.type = "button";
+        cancel.addEventListener("click", function() {
+          if (window.confirm("Cancel this order? It will remain in history.")) {
+            runAction(async function() {
+              await DataService.updateOrderStatus(order.id, "cancelled");
+              await refreshData(true);
+              showNotice("Order cancelled.");
+            });
+          }
+        });
+        actions.append(cancel);
+      }
+    }
+    card.append(actions);
+    return card;
+  }
+
+  function getQueuedOrderPreviews() {
+    if (!State.pendingActions) return [];
+    return State.pendingActions.filter(function(action) {
+      return action.method === "createOrder" && action.preview;
+    }).map(function(action) {
+      return Object.assign({}, action.preview, {
+        id: action.request_id,
+        request_id: action.request_id,
+        order_number: "Pending sync",
+        status: "pending_sync",
+        created_at: action.created_at
+      });
+    });
+  }
+
+  function renderProducts() {
+    renderCatalogTable("products-table", State.data.products || [], "No products yet.");
+  }
+
+  function renderAddOns() {
+    renderCatalogTable("addons-table", State.data.addOns || [], "No add-ons yet.");
+  }
+
+  function renderCatalogTable(containerId, records, emptyMessage) {
+    const container = byId(containerId);
+    container.replaceChildren();
+    if (!records.length) {
+      container.append(element("p", "muted", emptyMessage));
+      return;
+    }
+    const isProductTable = containerId === "products-table";
+    const table = createTable(isProductTable
+      ? ["Name", "Size", "Category", "USD", "KHR", "Stock link"]
+      : ["Name", "USD", "KHR", "Stock link"]);
+    records.forEach(function(record) {
+      const row = table.insertRow();
+      row.insertCell().textContent = record.name;
+      if (isProductTable) {
+        row.insertCell().textContent = record.size || "—";
+        row.insertCell().textContent = record.category || "—";
+      }
+      row.insertCell().textContent = record.price_usd_minor === "" ? "—" : moneyFromMinor(record.price_usd_minor, "USD");
+      row.insertCell().textContent = record.price_khr_minor === "" ? "—" : moneyFromMinor(record.price_khr_minor, "KHR");
+      const linked = (State.data.inventoryItems || []).find(function(item) {
+        return item.id === record.inventory_item_id;
+      });
+      row.insertCell().textContent = linked ? linked.name : "—";
+    });
+    container.append(table);
+  }
+
+  function renderSuppliers() {
+    const container = byId("suppliers-table");
+    container.replaceChildren();
+    const suppliers = State.data.suppliers || [];
+    if (!suppliers.length) {
+      container.append(element("p", "muted", "No suppliers yet."));
+      return;
+    }
+    const table = createTable(["Supplier", "Phone", "Email", "Notes"]);
+    suppliers.forEach(function(supplier) {
+      const row = table.insertRow();
+      [supplier.name, supplier.phone, supplier.email, supplier.notes].forEach(function(value) {
+        row.insertCell().textContent = value || "—";
+      });
+    });
+    container.append(table);
+  }
+
+  function renderStock() {
+    const container = byId("stock-table");
+    container.replaceChildren();
+    const items = State.data.stock || [];
+    if (!items.length) {
+      container.append(element("p", "muted", "No stock items yet."));
+      return;
+    }
+    const table = createTable(["Item", "Category", "On hand", "Low threshold", "Status", "History"]);
+    items.forEach(function(item) {
+      const row = table.insertRow();
+      row.insertCell().textContent = item.name;
+      row.insertCell().textContent = item.category.replaceAll("_", " ");
+      row.insertCell().textContent = formatQuantity(item.on_hand_milli) + " " + item.base_unit;
+      row.insertCell().textContent = formatQuantity(item.low_stock_threshold_milli) + " " + item.base_unit;
+      row.insertCell().textContent = item.is_low ? "Low" : "OK";
+      const historyCell = row.insertCell();
+      const button = element("button", "button-muted", "View");
+      button.type = "button";
+      button.addEventListener("click", function() {
+        byId("price-history-item").value = item.id;
+        loadPriceHistory();
+      });
+      historyCell.append(button);
+    });
+    container.append(table);
+  }
+
+  function renderSettings() {
+    const settings = State.data.settings || {};
+    byId("settings-form").elements.default_currency.value = settings.default_currency || "USD";
+    byId("settings-form").elements.tax_rate_basis_points.value = settings.tax_rate_basis_points || 0;
+    const backup = (State.data.backup || [])[0];
+    text(byId("backup-last-run"), backup
+      ? "Last backup: " + backup.created_at + " · " + backup.status + (backup.file_name ? " · " + backup.file_name : "")
+      : "No backup has completed yet.");
+    renderSimpleRows(byId("backup-log"), (State.data.backup || []).slice(0, 5).map(function(record) {
+      return record.created_at + " · " + record.status + (record.file_name ? " · " + record.file_name : "");
+    }), "Backup history will appear here.");
+  }
+
+  function populateSelects() {
+    const inventory = State.data.inventoryItems || [];
+    document.querySelectorAll(".inventory-select").forEach(function(select) {
+      const selected = select.value;
+      const categories = (select.dataset.categories || "").split(",").filter(Boolean);
+      const options = inventory.filter(function(item) {
+        return !categories.length || categories.includes(item.category);
+      });
+      select.replaceChildren();
+      select.append(new Option("Select stock item", ""));
+      options.forEach(function(item) {
+        select.append(new Option(item.name + " (" + item.base_unit + ")", item.id));
+      });
+      if (options.some(function(item) { return item.id === selected; })) select.value = selected;
+    });
+    document.querySelectorAll(".supplier-select").forEach(function(select) {
+      const selected = select.value;
+      select.replaceChildren();
+      select.append(new Option("Select supplier", ""));
+      (State.data.suppliers || []).forEach(function(supplier) {
+        select.append(new Option(supplier.name, supplier.id));
+      });
+      if ((State.data.suppliers || []).some(function(item) { return item.id === selected; })) select.value = selected;
+    });
+    const historySelect = byId("price-history-item");
+    const old = historySelect.value;
+    historySelect.replaceChildren();
+    historySelect.append(new Option("Select stock item", ""));
+    inventory.forEach(function(item) { historySelect.append(new Option(item.name, item.id)); });
+    if (inventory.some(function(item) { return item.id === old; })) historySelect.value = old;
+  }
+
+  function renderItemCards() {
+    const type = byId("line-type").value;
+    const isCustom = type === "custom";
+    const grid = byId("item-card-grid");
+    const customFields = byId("custom-item-fields");
+    customFields.hidden = !isCustom;
+    grid.hidden = isCustom;
+    grid.replaceChildren();
+    if (isCustom || !State.data) return;
+
+    const records = type === "product" ? State.data.products || [] : State.data.addOns || [];
+    if (!records.length) {
+      grid.append(element("p", "muted", type === "product" ? "No bakery products yet." : "No add-ons yet."));
+      return;
+    }
+    const currency = byId("order-currency").value;
+    records.forEach(function(record) {
+      const minor = currency === "USD" ? record.price_usd_minor : record.price_khr_minor;
+      const card = element("button", "item-card");
+      card.type = "button";
+      card.disabled = minor === "" || minor === undefined;
+      card.setAttribute("aria-label", "Add " + record.name +
+        (type === "product" && record.size ? " " + record.size : "") +
+        (card.disabled ? ", no " + currency + " price" : ", " + moneyFromMinor(minor, currency)));
+      card.append(element("span", "item-card-icon", getCatalogIcon(record, type)));
+      card.append(element("span", "item-card-name", record.name));
+      if (type === "product" && record.size) {
+        card.append(element("span", "item-card-size", record.size));
+      }
+      card.append(element("span", "item-card-price",
+        card.disabled ? "Price unavailable" : moneyFromMinor(minor, currency)));
+      card.addEventListener("click", function() {
+        try { addCartLine(record); } catch (error) { showNotice(error.message, true); }
+      });
+      grid.append(card);
+    });
+  }
+
+  function getCatalogIcon(record, type) {
+    const itemText = (record.name + " " + (record.category || "")).toLowerCase();
+    if (type === "add_on") {
+      if (itemText.includes("candle")) return "🕯️";
+      if (itemText.includes("box") || itemText.includes("gift")) return "🎁";
+      if (itemText.includes("message") || itemText.includes("card")) return "💌";
+      return "🎀";
+    }
+    if (itemText.includes("bread")) return "🍞";
+    if (itemText.includes("cookie")) return "🍪";
+    if (itemText.includes("pastry") || itemText.includes("croissant")) return "🥐";
+    if (itemText.includes("cake")) return "🍰";
+    return "🧁";
+  }
+
+  function renderCart() {
+    const body = byId("cart-lines");
+    body.replaceChildren();
+    const currency = byId("order-currency").value;
+    const quantityCount = State.cart.reduce(function(sum, item) { return sum + item.quantity; }, 0);
+    text(byId("cart-item-count"), State.cart.length + " line(s) · " + quantityCount + " item(s)");
+    if (!State.cart.length) {
+      const row = body.insertRow();
+      const cell = row.insertCell();
+      cell.colSpan = 5;
+      cell.className = "empty-cell";
+      cell.textContent = "Tap a product card above to start this order.";
+      text(byId("cart-subtotal"), moneyFromMinor(0, currency));
+      renderOrderTotals();
+      return;
+    }
+    let totalMinor = 0;
+    State.cart.forEach(function(item, index) {
+      const lineTotal = item.unit_price_minor * item.quantity;
+      totalMinor += lineTotal;
+      const row = body.insertRow();
+      const nameCell = row.insertCell();
+      nameCell.append(element("span", "cart-item-name", item.name));
+      if (item.variant) nameCell.append(element("span", "cart-item-size", item.variant));
+      row.insertCell().textContent = String(item.quantity);
+      row.insertCell().textContent = moneyFromMinor(item.unit_price_minor, currency);
+      row.insertCell().textContent = moneyFromMinor(lineTotal, currency);
+      const removeCell = row.insertCell();
+      const remove = element("button", "button-muted remove-item-button", "×");
+      remove.type = "button";
+      remove.setAttribute("aria-label", "Remove " + item.name + " from order");
+      remove.addEventListener("click", function() {
+        State.cart.splice(index, 1);
+        renderCart();
+      });
+      removeCell.append(remove);
+    });
+    text(byId("cart-subtotal"), moneyFromMinor(totalMinor, currency));
+    renderOrderTotals();
+  }
+
+  function addCartLine(record) {
+    const type = byId("line-type").value;
+    const currency = byId("order-currency").value;
+    const quantity = Number(byId("line-quantity").value);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      throw new Error("Quantity must be a positive whole number.");
+    }
+    let line;
+    if (type === "custom") {
+      const price = String(byId("custom-price").value || "");
+      const name = byId("custom-name").value.trim();
+      if (!name || price === "") throw new Error("Enter a custom item name and unit price.");
+      line = {
+        item_type: "custom",
+        name: name,
+        unit_price: price,
+        unit_price_minor: parseClientMoneyMinor(price, currency),
+        quantity: quantity,
+        variant: ""
+      };
+    } else {
+      if (!record) throw new Error("Select an available catalog item.");
+      const minor = currency === "USD" ? record.price_usd_minor : record.price_khr_minor;
+      if (minor === "" || minor === undefined) throw new Error("The item has no " + currency + " price.");
+      line = {
+        item_type: type,
+        catalog_item_id: record.id,
+        name: record.name,
+        unit_price_minor: Number(minor),
+        quantity: quantity,
+        variant: type === "product" ? record.size || "" : ""
+      };
+    }
+    State.cart.push(line);
+    byId("line-quantity").value = "1";
+    if (type === "custom") {
+      byId("custom-name").value = "";
+      byId("custom-price").value = "";
+    }
+    renderCart();
+  }
+
+  function parseClientMoneyMinor(value, currency) {
+    const exponent = CURRENCY_EXPONENTS[currency];
+    const textValue = String(value).trim();
+    const pattern = exponent === 2 ? /^\d+(?:\.\d{1,2})?$/ : /^\d+$/;
+    if (!pattern.test(textValue)) throw new Error(currency + " amount has invalid precision.");
+    const parts = textValue.split(".");
+    const minor = Number(parts[0]) * Math.pow(10, exponent) +
+      (exponent ? Number(((parts[1] || "") + "00").slice(0, exponent)) : 0);
+    if (!Number.isSafeInteger(minor)) throw new Error("Amount is out of range.");
+    return minor;
+  }
+
+  function readPreviewMoney(value, currency) {
+    if (value === "" || value === null || value === undefined) return 0;
+    try {
+      return parseClientMoneyMinor(value, currency);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function renderOrderTotals() {
+    if (!State.data) return;
+    const currency = byId("order-currency").value;
+    const subtotal = State.cart.reduce(function(sum, item) {
+      return sum + item.unit_price_minor * item.quantity;
+    }, 0);
+    const fee = readPreviewMoney(byId("delivery-fee").value, currency);
+    const discount = readPreviewMoney(byId("order-form").elements.discount.value, currency);
+    const paid = readPreviewMoney(byId("order-form").elements.paid_amount.value, currency);
+    const invalid = fee === null || discount === null || paid === null || discount > subtotal;
+    const taxBase = invalid ? 0 : subtotal - discount;
+    const tax = Math.round(taxBase * Number(State.data.settings.tax_rate_basis_points || 0) / 10000);
+    const total = invalid ? 0 : subtotal - discount + tax + fee;
+    const balance = total - (paid === null ? 0 : paid);
+    text(byId("order-subtotal-preview"), moneyFromMinor(subtotal, currency));
+    text(byId("order-delivery-preview"), fee === null ? "Check amount" : moneyFromMinor(fee, currency));
+    text(byId("order-discount-preview"), discount === null ? "Check amount" : moneyFromMinor(discount, currency));
+    text(byId("order-tax-preview"), moneyFromMinor(tax, currency));
+    text(byId("order-total-preview"), invalid ? "Check entered amounts" : moneyFromMinor(total, currency));
+    text(byId("order-balance-preview"), invalid || paid > total
+      ? "Check entered amounts"
+      : moneyFromMinor(balance, currency));
+  }
+
+  function phoneMatchKey(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
+  function scheduleCustomerLookup() {
+    if (customerLookupTimer) window.clearTimeout(customerLookupTimer);
+    const phone = byId("order-form").elements.customer_phone.value.trim();
+    const phoneKey = phoneMatchKey(phone);
+    const sequence = ++customerLookupSequence;
+    const container = byId("customer-match");
+    matchedCustomer = null;
+    if (phoneKey.length < 5) {
+      container.hidden = true;
+      return;
+    }
+
+    container.hidden = false;
+    byId("use-customer-match").hidden = true;
+    text(byId("customer-match-detail"), "Checking previous orders for this phone…");
+    customerLookupTimer = window.setTimeout(async function() {
+      try {
+        const customer = navigator.onLine
+          ? await DataService.findCustomerByPhone(phone)
+          : findCachedCustomerByPhone(phoneKey);
+        if (sequence !== customerLookupSequence ||
+            phoneMatchKey(byId("order-form").elements.customer_phone.value) !== phoneKey) return;
+        matchedCustomer = customer;
+        if (!customer) {
+          text(byId("customer-match-detail"), "No previous customer record found for this phone.");
+          return;
+        }
+        const detail = [
+          customer.customer_name || "Name not saved",
+          customer.location || "No saved location",
+          customer.order_count + " previous order(s)"
+        ];
+        if (customer.last_order_at) {
+          detail.push("Last order " + new Date(customer.last_order_at).toLocaleDateString());
+        }
+        text(byId("customer-match-detail"), "Found customer: " + detail.join(" · "));
+        byId("use-customer-match").hidden = !customer.customer_name && !customer.location;
+      } catch (error) {
+        if (sequence !== customerLookupSequence) return;
+        text(byId("customer-match-detail"), "Customer lookup failed: " + error.message);
+        showNotice("Customer lookup failed: " + error.message, true);
+      }
+    }, 250);
+  }
+
+  function findCachedCustomerByPhone(phoneKey) {
+    const matches = (State.data.orders || []).filter(function(order) {
+      return phoneMatchKey(order.customer_phone) === phoneKey;
+    }).sort(function(left, right) {
+      return String(right.created_at).localeCompare(String(left.created_at));
+    });
+    if (!matches.length) return null;
+    const namedOrder = matches.find(function(order) { return Boolean(order.customer_name); }) || matches[0];
+    const locatedOrder = matches.find(function(order) { return Boolean(order.location); }) || matches[0];
+    return {
+      customer_name: namedOrder.customer_name || "",
+      customer_phone: matches[0].customer_phone,
+      location: locatedOrder.location || "",
+      order_count: matches.length,
+      last_order_at: matches[0].created_at
+    };
+  }
+
+  function clearCustomerMatch() {
+    customerLookupSequence += 1;
+    if (customerLookupTimer) window.clearTimeout(customerLookupTimer);
+    customerLookupTimer = null;
+    matchedCustomer = null;
+    byId("customer-match").hidden = true;
+    byId("customer-match-detail").textContent = "";
+    byId("use-customer-match").hidden = true;
+  }
+
+  function createOrderPreview(payload) {
+    const subtotal = State.cart.reduce(function(sum, item) {
+      return sum + item.unit_price_minor * item.quantity;
+    }, 0);
+    const currency = payload.currency;
+    const discount = parseClientMoneyMinor(payload.discount || "0", currency);
+    const deliveryFee = parseClientMoneyMinor(payload.delivery_fee || "0", currency);
+    const tax = Math.round(
+      Math.max(0, subtotal - discount) *
+      Number(State.data.settings.tax_rate_basis_points || 0) / 10000
+    );
+    const paid = parseClientMoneyMinor(payload.paid_amount || "0", currency);
+    const total = Math.max(0, subtotal - discount + tax + deliveryFee);
+    return {
+      order_number: "Pending sync",
+      status: "pending_sync",
+      created_at: new Date().toISOString(),
+      customer_name: payload.customer_name || "Walk-in customer",
+      customer_phone: payload.customer_phone,
+      location: payload.location,
+      order_channel: payload.order_channel,
+      fulfillment_method: payload.fulfillment_method,
+      pickup_at: payload.pickup_at,
+      payment_method: payload.payment_method,
+      currency: currency,
+      subtotal_minor: subtotal,
+      delivery_fee_minor: deliveryFee,
+      discount_minor: discount,
+      tax_minor: tax,
+      total_minor: total,
+      amount_paid_minor: paid,
+      balance_due_minor: Math.max(total - paid, 0),
+      items: State.cart.map(function(item) {
+        return {
+          name_snapshot: item.name,
+          variant: item.variant,
+          quantity: item.quantity,
+          unit_price_minor: item.unit_price_minor,
+          line_total_minor: item.unit_price_minor * item.quantity
+        };
+      })
+    };
+  }
+
+  async function submitOrder(event) {
+    event.preventDefault();
+    if (!State.cart.length) throw new Error("Add at least one item.");
+    const form = byId("order-form");
+    const formData = new FormData(form);
+    const channel = formData.get("order_channel");
+    const localPickup = formData.get("pickup_at");
+    const currency = formData.get("currency");
+    const customDetails = byId("order-type").value === "custom_cake" ? {
+      flavor: byId("cake-flavor").value.trim(),
+      size: byId("cake-size").value.trim(),
+      inscription: byId("cake-inscription").value.trim()
+    } : {};
+    const payload = {
+      customer_name: formData.get("customer_name"),
+      customer_phone: formData.get("customer_phone"),
+      order_type: formData.get("order_type"),
+      order_channel: channel,
+      fulfillment_method: channel === "grab" ? "delivery" : "pickup",
+      pickup_at: localPickup ? new Date(localPickup).toISOString() : "",
+      currency: currency,
+      location: formData.get("location"),
+      delivery_fee: formData.get("delivery_fee") || "0",
+      discount: formData.get("discount") || "0",
+      paid_amount: formData.get("paid_amount") || "0",
+      payment_method: formData.get("payment_method"),
+      notes: formData.get("notes"),
+      custom_details: customDetails,
+      items: State.cart.map(function(item) {
+        return item.item_type === "custom" ? {
+          item_type: "custom",
+          name: item.name,
+          unit_price: item.unit_price,
+          quantity: item.quantity,
+          variant: item.variant
+        } : {
+          item_type: item.item_type,
+          catalog_item_id: item.catalog_item_id,
+          quantity: item.quantity,
+          variant: item.variant
+        };
+      })
+    };
+    const preview = createOrderPreview(payload);
+    const result = await DataService.createOrder(payload, preview);
+    const receipt = result.queued
+      ? preview
+      : result;
+    State.cart = [];
+    form.reset();
+    form.elements.currency.value = State.data.settings.default_currency || "USD";
+    State.orderCurrency = form.elements.currency.value;
+    form.elements.delivery_fee.step = State.orderCurrency === "USD" ? "0.01" : "1";
+    form.elements.discount.step = State.orderCurrency === "USD" ? "0.01" : "1";
+    form.elements.paid_amount.step = State.orderCurrency === "USD" ? "0.01" : "1";
+    byId("custom-price").step = State.orderCurrency === "USD" ? "0.01" : "1";
+    byId("cake-details").hidden = true;
+    clearCustomerMatch();
+    renderItemCards();
+    renderCart();
+    await refreshData(true);
+    showNotice(result.queued ? "Order queued on this device. It is not yet shared with other devices." : "Order saved.");
+    showReceipt(receipt);
+  }
+
+  function showReceipt(order) {
+    const currency = order.currency;
+    const items = order.items || [];
+    text(byId("receipt-order-number"), order.order_number || "Pending sync");
+    text(byId("receipt-order-status"), order.request_id || order.status === "pending_sync"
+      ? "Saved on this device; waiting to sync to the shop."
+      : "Order saved");
+
+    const details = byId("receipt-customer-details");
+    details.replaceChildren();
+    const payment = (order.payments || []).find(function(record) {
+      return record.status === "completed";
+    });
+    const detailRows = [
+      ["Date", order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString()],
+      ["Customer", order.customer_name || "Walk-in customer"],
+      ["Phone", order.customer_phone || "—"],
+      ["Order type", String(order.order_type || "walk_in").replaceAll("_", " ")],
+      ["Fulfillment", String(order.order_channel || "") + " · " + String(order.fulfillment_method || "")],
+      ["Pickup / delivery time", order.pickup_at ? new Date(order.pickup_at).toLocaleString() : "—"],
+      ["Location", order.location || "—"],
+      ["Payment method", payment ? payment.method.replaceAll("_", " ") : order.payment_method || "—"]
+    ];
+    detailRows.forEach(function(pair) {
+      details.append(element("dt", "", pair[0]));
+      details.append(element("dd", "", pair[1]));
+    });
+
+    const itemBody = byId("receipt-items");
+    itemBody.replaceChildren();
+    items.forEach(function(item) {
+      const row = itemBody.insertRow();
+      row.insertCell().textContent = item.name_snapshot + (item.variant ? " · " + item.variant : "");
+      row.insertCell().textContent = String(item.quantity);
+      row.insertCell().textContent = moneyFromMinor(
+        item.line_total_minor === undefined
+          ? Number(item.unit_price_minor || 0) * Number(item.quantity || 0)
+          : item.line_total_minor,
+        currency
+      );
+    });
+
+    const totals = byId("receipt-totals");
+    totals.replaceChildren();
+    [
+      ["Items subtotal", order.subtotal_minor],
+      ["Delivery fee", order.delivery_fee_minor || 0],
+      ["Discount", order.discount_minor || 0],
+      ["Tax", order.tax_minor || 0],
+      ["Total", order.total_minor]
+    ].forEach(function(pair, index) {
+      const row = element("div", index === 4 ? "receipt-grand-total" : "");
+      row.append(element("span", "", pair[0]));
+      const amount = moneyFromMinor(Number(pair[1] || 0), currency);
+      row.append(element("strong", "", index === 2 && Number(pair[1] || 0) ? "-" + amount : amount));
+      totals.append(row);
+    });
+    const paid = Number(order.amount_paid_minor || 0);
+    const due = order.balance_due_minor === undefined
+      ? Math.max(Number(order.total_minor || 0) - paid, 0)
+      : Number(order.balance_due_minor);
+    text(byId("receipt-payment-state"),
+      "Paid " + moneyFromMinor(paid, currency) + " · Balance due " + moneyFromMinor(due, currency));
+    byId("receipt-dialog").showModal();
+  }
+
+  function createTable(headers) {
+    const table = element("table");
+    const head = table.createTHead().insertRow();
+    headers.forEach(function(header) { head.append(element("th", "", header)); });
+    table.createTBody();
+    return table;
+  }
+
+  async function loadPriceHistory() {
+    const itemId = byId("price-history-item").value;
+    const tableContainer = byId("price-history-table");
+    const chart = byId("price-history-chart");
+    tableContainer.replaceChildren();
+    chart.replaceChildren();
+    if (!itemId) return;
+    try {
+      const history = await DataService.getPriceHistory(itemId);
+      renderPriceChart(history);
+      if (!history.length) {
+        tableContainer.append(element("p", "muted", "No recorded quotes or purchases for this item."));
+        return;
+      }
+      const unit = (State.data.inventoryItems.find(function(item) { return item.id === itemId; }) || {}).base_unit || "";
+      const table = createTable(["Date", "Type", "Supplier", "Quantity", "Total cost", "Unit cost", "Currency"]);
+      history.forEach(function(entry) {
+        const row = table.tBodies[0].insertRow();
+        row.insertCell().textContent = new Date(entry.date).toLocaleDateString();
+        row.insertCell().textContent = entry.type === "purchase" ? "Received purchase" : "Quote";
+        row.insertCell().textContent = entry.supplier_name;
+        row.insertCell().textContent = formatQuantity(entry.quantity_base_milli) + " " + unit;
+        row.insertCell().textContent = moneyFromMinor(entry.total_cost_minor, entry.currency);
+        const baseQuantity = Number(entry.quantity_base_milli) / 1000;
+        const totalMajor = Number(entry.total_cost_minor) / Math.pow(10, CURRENCY_EXPONENTS[entry.currency]);
+        row.insertCell().textContent = baseQuantity
+          ? moneyFromMajor(totalMajor / baseQuantity, entry.currency) + " / " + unit
+          : "—";
+        row.insertCell().textContent = entry.currency;
+      });
+      tableContainer.append(table);
+    } catch (error) {
+      showNotice(error.message, true);
+    }
+  }
+
+  function renderPriceChart(entries) {
+    const container = byId("price-history-chart");
+    const currencies = Array.from(new Set(entries.map(function(entry) { return entry.currency; })));
+    if (!entries.length) return;
+    currencies.forEach(function(currency) {
+      const series = entries.filter(function(entry) { return entry.currency === currency; })
+        .slice().sort(function(a, b) { return new Date(a.date) - new Date(b.date); });
+      if (series.length < 2) {
+        container.append(element("p", "muted", currency + ": add another quote or purchase to see a trend."));
+        return;
+      }
+      const values = series.map(function(entry) {
+        return Number(entry.total_cost_minor) / (Number(entry.quantity_base_milli) / 1000);
+      });
+      const min = Math.min.apply(null, values);
+      const max = Math.max.apply(null, values);
+      const width = 620, height = 130, pad = 14;
+      const points = values.map(function(value, index) {
+        const x = pad + index * (width - 2 * pad) / (values.length - 1);
+        const y = height - pad - (max === min ? 0.5 : (value - min) / (max - min)) * (height - 2 * pad);
+        return x + "," + y;
+      }).join(" ");
+      const wrapper = element("div", "chart-series");
+      wrapper.append(element("p", "muted", currency + " unit price per base unit"));
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      line.setAttribute("points", points);
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", "#7a4b2a");
+      line.setAttribute("stroke-width", "3");
+      svg.append(line);
+      wrapper.append(svg);
+      container.append(wrapper);
+    });
+  }
+
+  function openPaymentDialog(order) {
+    const dialog = byId("payment-dialog");
+    const form = byId("payment-form");
+    form.elements.order_id.value = order.id;
+    form.elements.amount.step = order.currency === "USD" ? "0.01" : "1";
+    form.elements.amount.max = Number(order.balance_due_minor) / Math.pow(10, CURRENCY_EXPONENTS[order.currency]);
+    form.elements.amount.value = "";
+    text(byId("payment-order-context"),
+      order.order_number + " · remaining balance " + moneyFromMinor(order.balance_due_minor, order.currency));
+    dialog.showModal();
+  }
+
+  async function updateQueueStatus() {
+    try {
+      State.pendingActions = await DataService.getPendingActions();
+      const count = State.pendingActions.length;
+      text(byId("pending-count"), count ? count + " action(s) waiting on this device." : "No pending offline actions.");
+      setConnectionState(!navigator.onLine);
+      renderOrders();
+    } catch (error) {
+      showNotice("Offline queue is unavailable: " + error.message, true);
+    }
+  }
+
+  async function runAction(action) {
+    try {
+      await action();
+    } catch (error) {
+      showNotice(error.message, true);
+    }
+  }
+
+  function bindForms() {
+    document.querySelectorAll(".nav-button").forEach(function(button) {
+      button.addEventListener("click", function() { showScreen(button.dataset.screen); });
+    });
+    byId("refresh-button").addEventListener("click", function() {
+      runAction(async function() {
+        await DataService.flushPendingActions();
+        await refreshData(false);
+      });
+    });
+    byId("line-type").addEventListener("change", renderItemCards);
+    byId("order-form").elements.customer_phone.addEventListener("input", scheduleCustomerLookup);
+    byId("use-customer-match").addEventListener("click", function() {
+      if (!matchedCustomer) return;
+      byId("order-form").elements.customer_name.value = matchedCustomer.customer_name || "";
+      byId("order-form").elements.location.value = matchedCustomer.location || "";
+      showNotice("Saved customer details filled in.");
+    });
+    ["delivery_fee", "discount", "paid_amount"].forEach(function(name) {
+      byId("order-form").elements[name].addEventListener("input", renderOrderTotals);
+    });
+    byId("order-currency").addEventListener("change", function() {
+      const selectedCurrency = byId("order-currency").value;
+      const form = byId("order-form");
+      const hasAmounts = ["delivery_fee", "discount", "paid_amount"].some(function(name) {
+        return Number(form.elements[name].value || 0) > 0;
+      });
+      if ((State.cart.length || hasAmounts) &&
+          !window.confirm("Changing currency clears the current items and entered amounts. Continue?")) {
+        byId("order-currency").value = State.orderCurrency;
+        return;
+      }
+      State.cart = [];
+      form.elements.delivery_fee.value = "0";
+      form.elements.discount.value = "0";
+      form.elements.paid_amount.value = "0";
+      State.orderCurrency = selectedCurrency;
+      byId("custom-price").step = selectedCurrency === "USD" ? "0.01" : "1";
+      byId("order-form").elements.delivery_fee.step = selectedCurrency === "USD" ? "0.01" : "1";
+      byId("order-form").elements.discount.step = selectedCurrency === "USD" ? "0.01" : "1";
+      byId("order-form").elements.paid_amount.step = selectedCurrency === "USD" ? "0.01" : "1";
+      renderItemCards();
+      renderCart();
+    });
+    byId("receive-currency").addEventListener("change", function() {
+      byId("receive-stock-form").elements.total_cost.step =
+        byId("receive-currency").value === "USD" ? "0.01" : "1";
+    });
+    byId("quote-currency").addEventListener("change", function() {
+      byId("quote-form").elements.price.step =
+        byId("quote-currency").value === "USD" ? "0.01" : "1";
+    });
+    byId("order-type").addEventListener("change", function(event) {
+      byId("cake-details").hidden = event.target.value !== "custom_cake";
+    });
+    byId("add-custom-line").addEventListener("click", function() {
+      try { addCartLine(); } catch (error) { showNotice(error.message, true); }
+    });
+    byId("order-form").addEventListener("submit", function(event) {
+      runAction(function() { return submitOrder(event); });
+    });
+    byId("orders-search").addEventListener("input", renderOrders);
+    byId("orders-status").addEventListener("change", renderOrders);
+    byId("product-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget;
+        const values = new FormData(form);
+        await DataService.createProduct({
+          name: values.get("name"),
+          category: values.get("category"),
+          size: values.get("size"),
+          price_usd: values.get("price_usd"),
+          price_khr: values.get("price_khr"),
+          inventory_item_id: values.get("inventory_item_id")
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Product saved.");
+      });
+    });
+    byId("addon-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget;
+        const values = new FormData(form);
+        await DataService.createAddOn({
+          name: values.get("name"),
+          price_usd: values.get("price_usd"),
+          price_khr: values.get("price_khr"),
+          inventory_item_id: values.get("inventory_item_id")
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Add-on saved.");
+      });
+    });
+    byId("supplier-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget, values = new FormData(form);
+        await DataService.createSupplier({
+          name: values.get("name"), phone: values.get("phone"),
+          email: values.get("email"), notes: values.get("notes")
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Supplier saved.");
+      });
+    });
+    byId("inventory-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget, values = new FormData(form);
+        await DataService.createInventoryItem({
+          name: values.get("name"), category: values.get("category"),
+          base_unit: values.get("base_unit"),
+          low_stock_threshold: values.get("low_stock_threshold")
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Stock item saved.");
+      });
+    });
+    byId("receive-stock-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget, values = new FormData(form);
+        await DataService.receiveStock({
+          supplier_id: values.get("supplier_id"),
+          currency: values.get("currency"),
+          reference: values.get("reference"),
+          lines: [{
+            inventory_item_id: values.get("inventory_item_id"),
+            quantity: values.get("quantity"),
+            total_cost: values.get("total_cost")
+          }]
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Stock receipt saved.");
+      });
+    });
+    byId("quote-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget, values = new FormData(form);
+        const quoteDate = values.get("quoted_at");
+        await DataService.recordSupplierPriceQuote({
+          supplier_id: values.get("supplier_id"),
+          inventory_item_id: values.get("inventory_item_id"),
+          package_quantity: values.get("package_quantity"),
+          price: values.get("price"),
+          currency: values.get("currency"),
+          quoted_at: quoteDate ? new Date(quoteDate + "T12:00:00").toISOString() : "",
+          notes: ""
+        });
+        form.reset();
+        await refreshData(true);
+        await loadPriceHistory();
+        showNotice("Supplier price quote saved.");
+      });
+    });
+    byId("stock-adjustment-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const form = event.currentTarget, values = new FormData(form);
+        await DataService.adjustStock({
+          inventory_item_id: values.get("inventory_item_id"),
+          movement_type: values.get("movement_type"),
+          direction: values.get("direction"),
+          quantity: values.get("quantity"),
+          notes: values.get("notes")
+        });
+        form.reset();
+        await refreshData(true);
+        showNotice("Stock adjustment saved.");
+      });
+    });
+    byId("price-history-item").addEventListener("change", loadPriceHistory);
+    byId("stock-refresh").addEventListener("click", function() { refreshData(false); });
+    byId("report-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const values = new FormData(event.currentTarget);
+        const report = await DataService.getReports({
+          from: values.get("from") ? new Date(values.get("from") + "T00:00:00").toISOString() : "",
+          to: values.get("to") ? new Date(values.get("to") + "T00:00:00").toISOString() : ""
+        });
+        renderReport(report);
+      });
+    });
+    byId("settings-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const values = new FormData(event.currentTarget);
+        await DataService.updateSettings({
+          default_currency: values.get("default_currency"),
+          tax_rate_basis_points: values.get("tax_rate_basis_points")
+        });
+        await refreshData(true);
+        showNotice("Settings saved.");
+      });
+    });
+    byId("payment-cancel").addEventListener("click", function() { byId("payment-dialog").close(); });
+    byId("receipt-close-button").addEventListener("click", function() { byId("receipt-dialog").close(); });
+    byId("receipt-print-button").addEventListener("click", function() { window.print(); });
+    byId("payment-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(async function() {
+        const values = new FormData(event.currentTarget);
+        await DataService.recordPayment(values.get("order_id"), {
+          amount: values.get("amount"),
+          method: values.get("method")
+        });
+        byId("payment-dialog").close();
+        await refreshData(true);
+        showNotice("Payment recorded.");
+      });
+    });
+    window.addEventListener("online", function() {
+      setConnectionState(false);
+      DataService.flushPendingActions()
+        .then(function() { refreshData(true); })
+        .catch(function(error) {
+          showNotice("Offline queue unavailable: " + error.message, true);
+        });
+    });
+    window.addEventListener("offline", function() { setConnectionState(true); });
+    window.addEventListener("bakery:queue-updated", updateQueueStatus);
+    window.addEventListener("bakery:queue-error", function(event) {
+      showNotice("A queued action needs attention: " + event.detail.message, true);
+    });
+    window.addEventListener("bakery:cache-error", function(event) {
+      showNotice("Browser offline cache is unavailable: " + event.detail.message, true);
+    });
+  }
+
+  function renderReport(report) {
+    const container = byId("report-results");
+    container.replaceChildren();
+    const cards = [
+      ["Orders", String(report.order_count)],
+      ["Sales USD", moneyFromMinor(report.totals.USD.sales_minor, "USD")],
+      ["Sales KHR", moneyFromMinor(report.totals.KHR.sales_minor, "KHR")],
+      ["Low stock", String(report.low_stock_count)],
+      ["Stock movements", String(report.movement_count)]
+    ];
+    cards.forEach(function(pair) {
+      const card = element("article", "kpi-card");
+      card.append(element("span", "", pair[0]));
+      card.append(element("strong", "", pair[1]));
+      container.append(card);
+    });
+  }
+
+  function bindCurrencyPrecision() {
+    document.querySelectorAll('input[name="price_usd"], input[name="total_cost"], input[name="price"]').forEach(function(input) {
+      input.step = "0.01";
+    });
+    document.querySelectorAll('input[name="price_khr"]').forEach(function(input) {
+      input.step = "1";
+    });
+  }
+
+  async function startApp() {
+    bindForms();
+    bindCurrencyPrecision();
+    try {
+      await DataService.flushPendingActions();
+    } catch (error) {
+      showNotice("Offline queue unavailable: " + error.message, true);
+    }
+    await refreshData(true);
+    refreshTimer = window.setInterval(function() {
+      if (navigator.onLine && !State.loading) refreshData(true);
+    }, 30000);
+  }
+
+  startApp();
+</script>

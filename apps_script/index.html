@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= include("Styles"); ?>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Bakery counter</p>
+        <h1>Bakery POS</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-status" class="connection-status">Connecting…</span>
+        <button id="refresh-button" class="button button-muted icon-button" type="button" aria-label="Refresh data" title="Refresh data">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <nav class="navigation" aria-label="Main navigation">
+        <button class="nav-button active" data-screen="dashboard">Dashboard</button>
+        <button class="nav-button" data-screen="new-order">New order</button>
+        <button class="nav-button" data-screen="orders">Orders</button>
+        <button class="nav-button" data-screen="products">Products & add-ons</button>
+        <button class="nav-button" data-screen="suppliers">Suppliers</button>
+        <button class="nav-button" data-screen="stock">Stock & price history</button>
+        <button class="nav-button" data-screen="reports">Reports</button>
+        <button class="nav-button" data-screen="settings">Settings & backup</button>
+      </nav>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+      <div id="offline-banner" class="offline-banner" hidden>
+        Offline: new actions are queued on this device and will sync when connection returns.
+      </div>
+
+      <section id="screen-dashboard" class="screen">
+        <div class="screen-heading">
+          <div>
+            <p class="eyebrow">Today</p>
+            <h2>Shop overview</h2>
+          </div>
+        </div>
+        <div class="kpi-grid">
+          <article class="kpi-card"><span>Orders</span><strong id="kpi-orders">—</strong></article>
+          <article class="kpi-card"><span>Sales USD</span><strong id="kpi-sales-usd">—</strong></article>
+          <article class="kpi-card"><span>Sales KHR</span><strong id="kpi-sales-khr">—</strong></article>
+          <article class="kpi-card"><span>Low-stock items</span><strong id="kpi-low-stock">—</strong></article>
+        </div>
+        <div class="content-grid">
+          <article class="panel">
+            <h3>Orders needing attention</h3>
+            <div id="dashboard-orders" class="compact-list"></div>
+          </article>
+          <article class="panel">
+            <h3>Low stock</h3>
+            <div id="dashboard-stock" class="compact-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="screen-new-order" class="screen" hidden>
+        <div class="screen-heading">
+          <div><p class="eyebrow">Sales</p><h2>New order</h2></div>
+        </div>
+        <aside class="order-flow-note" role="note">
+          <span class="order-flow-icon" aria-hidden="true">🧁</span>
+          <div class="order-flow-content">
+            <h3>Order flow</h3>
+            <ol class="order-flow-steps">
+              <li>Enter customer and fulfillment details</li>
+              <li>Tap products to add them to the order</li>
+              <li>Review payment, save, then print the receipt</li>
+            </ol>
+            <p id="pending-count" class="muted">No pending offline actions.</p>
+          </div>
+        </aside>
+        <form id="order-form" class="order-workflow">
+          <section class="panel order-section">
+            <div class="order-section-heading">
+              <span class="section-step" aria-hidden="true">1</span>
+              <div><p class="eyebrow">Customer & fulfillment</p><h3>Order details</h3></div>
+            </div>
+            <div class="form-grid order-details-grid">
+              <label>Customer name<input name="customer_name" maxlength="120" autocomplete="name"></label>
+              <label>Phone<input name="customer_phone" type="tel" inputmode="tel" maxlength="40" autocomplete="tel"></label>
+              <div id="customer-match" class="customer-match span-all" role="status" aria-live="polite" hidden>
+                <p id="customer-match-detail"></p>
+                <button id="use-customer-match" class="button button-muted" type="button">Use saved details</button>
+              </div>
+              <label>Order type
+                <select id="order-type" name="order_type">
+                  <option value="walk_in">Walk-in</option>
+                  <option value="advance">Advance order</option>
+                  <option value="custom_cake">Custom cake</option>
+                </select>
+              </label>
+              <label>Channel
+                <select name="order_channel">
+                  <option value="walk_in">Walk-in</option>
+                  <option value="grab">Grab</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <label>Pickup / delivery time<input name="pickup_at" type="datetime-local"></label>
+              <label>Currency
+                <select name="currency" id="order-currency">
+                  <option value="USD">USD</option>
+                  <option value="KHR">KHR</option>
+                </select>
+              </label>
+              <label class="span-all">Location / delivery address<input name="location" maxlength="300" autocomplete="street-address" placeholder="Optional"></label>
+              <label>Delivery fee<input name="delivery_fee" id="delivery-fee" type="number" min="0" step="0.01" value="0"></label>
+              <p class="field-help">Saved with the order and included in the total.</p>
+              <div id="cake-details" class="span-all subpanel" hidden>
+                <h3>Custom cake details</h3>
+                <div class="form-grid">
+                  <label>Flavor<input id="cake-flavor" maxlength="80"></label>
+                  <label>Size<input id="cake-size" maxlength="80"></label>
+                  <label class="span-all">Inscription / design notes<textarea id="cake-inscription" rows="2" maxlength="500"></textarea></label>
+                </div>
+              </div>
+              <label class="span-all">Order notes<textarea name="notes" rows="2" maxlength="2000"></textarea></label>
+            </div>
+          </section>
+
+          <section class="panel order-section">
+            <div class="order-section-heading">
+              <span class="section-step" aria-hidden="true">2</span>
+              <div><p class="eyebrow">Quick selection</p><h3>Add items</h3></div>
+            </div>
+            <div class="item-picker-controls">
+              <label>Item type
+                <select id="line-type">
+                  <option value="product">Bakery products</option>
+                  <option value="add_on">Add-ons</option>
+                  <option value="custom">Custom item</option>
+                </select>
+              </label>
+              <label>Quantity<input id="line-quantity" type="number" min="1" step="1" value="1"></label>
+            </div>
+            <p class="muted">Tap an item card to add it. Different sizes are separate catalog items.</p>
+            <div id="item-card-grid" class="item-card-grid" aria-live="polite"></div>
+            <div id="custom-item-fields" class="custom-item-fields" hidden>
+              <label>Custom item name<input id="custom-name" maxlength="160"></label>
+              <label>Unit price<input id="custom-price" type="number" min="0" step="0.01"></label>
+              <button id="add-custom-line" class="button button-muted" type="button">Add custom item</button>
+            </div>
+          </section>
+
+          <section class="panel order-section cart-section">
+            <div class="order-section-heading">
+              <span class="section-step" aria-hidden="true">3</span>
+              <div><p class="eyebrow">Order contents</p><h3>Added items</h3></div>
+              <span id="cart-item-count" class="item-count">0 items</span>
+            </div>
+            <div class="table-wrap">
+              <table class="order-cart-table">
+                <thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Line total</th><th></th></tr></thead>
+                <tbody id="cart-lines"><tr><td colspan="5" class="empty-cell">Tap a product card above to start this order.</td></tr></tbody>
+                <tfoot><tr><th colspan="3">Items subtotal</th><td id="cart-subtotal">—</td><td></td></tr></tfoot>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel order-section">
+            <div class="order-section-heading">
+              <span class="section-step" aria-hidden="true">4</span>
+              <div><p class="eyebrow">Checkout</p><h3>Totals & payment</h3></div>
+            </div>
+            <div class="totals-payment-layout">
+              <div class="money-breakdown" aria-live="polite">
+                <div><span>Items subtotal</span><strong id="order-subtotal-preview">—</strong></div>
+                <div><span>Delivery fee</span><strong id="order-delivery-preview">—</strong></div>
+                <div><span>Discount</span><strong id="order-discount-preview">—</strong></div>
+                <div><span>Tax</span><strong id="order-tax-preview">—</strong></div>
+                <div class="money-total"><span>Total</span><strong id="order-total-preview">—</strong></div>
+                <div><span>Balance due</span><strong id="order-balance-preview">—</strong></div>
+              </div>
+              <div class="payment-fields">
+                <label>Discount<input name="discount" type="number" min="0" step="0.01" value="0"></label>
+                <label>Amount paid now<input name="paid_amount" type="number" min="0" step="0.01" value="0"></label>
+                <label>Payment method
+                  <select name="payment_method"><option value="cash">Cash</option><option value="card_terminal">Card terminal</option><option value="other">Other</option></select>
+                </label>
+                <p class="field-help">Tax is calculated on discounted items; delivery fee is added to the total.</p>
+              </div>
+            </div>
+            <div class="form-actions checkout-actions">
+              <button class="button" type="submit">
+                <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H3V3h2Zm2 0v6h10V3M7 21v-8h10v8"/></svg>
+                Save order & show receipt
+              </button>
+            </div>
+          </section>
+        </form>
+      </section>
+
+      <section id="screen-orders" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Fulfillment</p><h2>Orders</h2></div></div>
+        <div class="filter-row">
+          <input id="orders-search" placeholder="Search customer or order number">
+          <select id="orders-status">
+            <option value="">All statuses</option>
+            <option value="new">New</option><option value="preparing">Preparing</option>
+            <option value="ready">Ready</option><option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
+        <div id="orders-list" class="orders-list"></div>
+      </section>
+
+      <section id="screen-products" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Catalog</p><h2>Products & add-ons</h2></div></div>
+        <div class="content-grid">
+          <form id="product-form" class="panel form-grid">
+            <h3 class="span-all">Add bakery product</h3>
+            <label>Name<input name="name" required maxlength="120"></label>
+            <label>Category<input name="category" maxlength="80" placeholder="Cake, bread, pastry…"></label>
+            <label>Size / option<input name="size" maxlength="80" placeholder="6 inch, 1 kg…"></label>
+            <label>Price (USD)<input name="price_usd" type="number" min="0" step="0.01"></label>
+            <label>Price (KHR)<input name="price_khr" type="number" min="0" step="1"></label>
+            <label class="span-all">Linked finished stock item (optional)
+              <select name="inventory_item_id" class="inventory-select" data-categories="finished_product"></select>
+            </label>
+            <div class="span-all"><button class="button" type="submit">Save product</button></div>
+          </form>
+          <form id="addon-form" class="panel form-grid">
+            <h3 class="span-all">Add bakery add-on</h3>
+            <label>Name<input name="name" required maxlength="120" placeholder="Candles, gift box…"></label>
+            <label>Price (USD)<input name="price_usd" type="number" min="0" step="0.01"></label>
+            <label>Price (KHR)<input name="price_khr" type="number" min="0" step="1"></label>
+            <label class="span-all">Linked stock item (optional)
+              <select name="inventory_item_id" class="inventory-select" data-categories="accessory,packaging"></select>
+            </label>
+            <div class="span-all"><button class="button" type="submit">Save add-on</button></div>
+          </form>
+        </div>
+        <div class="content-grid catalog-tables">
+          <article class="panel"><h3>Bakery products</h3><div id="products-table" class="table-wrap"></div></article>
+          <article class="panel"><h3>Add-ons</h3><div id="addons-table" class="table-wrap"></div></article>
+        </div>
+      </section>
+
+      <section id="screen-suppliers" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Purchasing</p><h2>Suppliers</h2></div></div>
+        <div class="content-grid">
+          <form id="supplier-form" class="panel form-grid">
+            <h3 class="span-all">Add supplier</h3>
+            <label>Name<input name="name" required maxlength="120"></label>
+            <label>Phone<input name="phone" maxlength="40"></label>
+            <label>Email<input name="email" type="email" maxlength="160"></label>
+            <label class="span-all">Notes<textarea name="notes" rows="2" maxlength="1000"></textarea></label>
+            <div class="span-all"><button class="button" type="submit">Save supplier</button></div>
+          </form>
+          <article class="panel"><h3>Supplier list</h3><div id="suppliers-table" class="table-wrap"></div></article>
+        </div>
+      </section>
+
+      <section id="screen-stock" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Inventory</p><h2>Stock & price history</h2></div></div>
+        <div class="content-grid">
+          <form id="inventory-form" class="panel form-grid">
+            <h3 class="span-all">Add stock item</h3>
+            <label>Name<input name="name" required maxlength="120"></label>
+            <label>Category
+              <select name="category">
+                <option value="ingredient">Ingredient</option>
+                <option value="packaging">Packaging</option>
+                <option value="finished_product">Finished product</option>
+                <option value="accessory">Accessory</option>
+              </select>
+            </label>
+            <label>Base unit
+              <select name="base_unit"><option value="g">g</option><option value="ml">ml</option><option value="each">each</option></select>
+            </label>
+            <label>Low-stock threshold<input name="low_stock_threshold" type="number" min="0" step="0.001" value="0"></label>
+            <div class="span-all"><button class="button" type="submit">Save stock item</button></div>
+          </form>
+          <form id="receive-stock-form" class="panel form-grid">
+            <h3 class="span-all">Receive a purchase</h3>
+            <label>Supplier<select name="supplier_id" class="supplier-select" required></select></label>
+            <label>Stock item<select name="inventory_item_id" class="inventory-select" required></select></label>
+            <label>Quantity in base units<input name="quantity" type="number" min="0.001" step="0.001" required></label>
+            <label>Total purchase cost<input name="total_cost" type="number" min="0.01" step="0.01" required></label>
+            <label>Currency<select id="receive-currency" name="currency"><option value="USD">USD</option><option value="KHR">KHR</option></select></label>
+            <label>Receipt reference<input name="reference" maxlength="100"></label>
+            <div class="span-all"><button class="button" type="submit">Receive stock</button></div>
+          </form>
+          <form id="quote-form" class="panel form-grid">
+            <h3 class="span-all">Record supplier price quote</h3>
+            <label>Supplier<select name="supplier_id" class="supplier-select" required></select></label>
+            <label>Stock item<select name="inventory_item_id" class="inventory-select" required></select></label>
+            <label>Package quantity in base units<input name="package_quantity" type="number" min="0.001" step="0.001" required></label>
+            <label>Package price<input name="price" type="number" min="0" step="0.01" required></label>
+            <label>Currency<select id="quote-currency" name="currency"><option value="USD">USD</option><option value="KHR">KHR</option></select></label>
+            <label>Quote date<input name="quoted_at" type="date"></label>
+            <div class="span-all"><button class="button" type="submit">Save price quote</button></div>
+          </form>
+          <form id="stock-adjustment-form" class="panel form-grid">
+            <h3 class="span-all">Adjust stock / record waste</h3>
+            <label>Stock item<select name="inventory_item_id" class="inventory-select" required></select></label>
+            <label>Movement
+              <select name="movement_type"><option value="adjustment">Adjustment</option><option value="waste">Waste</option></select>
+            </label>
+            <label>Direction<select name="direction"><option value="remove">Remove</option><option value="add">Add</option></select></label>
+            <label>Quantity<input name="quantity" type="number" min="0.001" step="0.001" required></label>
+            <label class="span-all">Reason<input name="notes" maxlength="1000"></label>
+            <div class="span-all"><button class="button" type="submit">Save adjustment</button></div>
+          </form>
+        </div>
+        <article class="panel">
+          <div class="section-heading"><h3>Stock on hand</h3><button id="stock-refresh" class="button button-muted icon-button" type="button" aria-label="Refresh stock" title="Refresh stock"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg></button></div>
+          <div id="stock-table" class="table-wrap"></div>
+        </article>
+        <article class="panel">
+          <div class="section-heading"><h3>Supplier price history</h3></div>
+          <label class="history-select">Stock item<select id="price-history-item" class="inventory-select"></select></label>
+          <div id="price-history-chart" class="chart" aria-label="Stock item price history chart"></div>
+          <div id="price-history-table" class="table-wrap"></div>
+        </article>
+        <p class="muted">Ingredient usage in recipes is not deducted automatically yet. Record production, waste, and corrections as stock movements.</p>
+      </section>
+
+      <section id="screen-reports" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Performance</p><h2>Reports</h2></div></div>
+        <form id="report-form" class="panel filter-row">
+          <label>From<input name="from" type="date"></label>
+          <label>To<input name="to" type="date"></label>
+          <button class="button" type="submit">Run report</button>
+        </form>
+        <div id="report-results" class="kpi-grid"></div>
+      </section>
+
+      <section id="screen-settings" class="screen" hidden>
+        <div class="screen-heading"><div><p class="eyebrow">Configuration</p><h2>Settings & backup</h2></div></div>
+        <div class="content-grid">
+          <form id="settings-form" class="panel form-grid">
+            <h3 class="span-all">Shop settings</h3>
+            <label>Default currency<select name="default_currency"><option value="USD">USD</option><option value="KHR">KHR</option></select></label>
+            <label>Tax rate (basis points)<input name="tax_rate_basis_points" type="number" min="0" max="10000" step="1"></label>
+            <p class="span-all muted">USD and KHR are stored separately. No exchange rate conversion is applied.</p>
+            <div class="span-all"><button class="button" type="submit">Save settings</button></div>
+          </form>
+          <article class="panel">
+            <h3>Daily Google Drive backup</h3>
+            <p>A dated copy of the full spreadsheet is saved in the restricted Bakery POS Backups folder every day.</p>
+            <p id="backup-last-run" class="muted">Loading backup status…</p>
+            <div id="backup-log" class="compact-list"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+    <dialog id="payment-dialog" class="payment-dialog">
+      <form id="payment-form" class="form-grid">
+        <h2 class="span-all">Record payment</h2>
+        <p id="payment-order-context" class="span-all muted"></p>
+        <input name="order_id" type="hidden">
+        <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required></label>
+        <label>Method
+          <select name="method"><option value="cash">Cash</option><option value="card_terminal">Card terminal</option><option value="other">Other</option></select>
+        </label>
+        <div class="span-all form-actions">
+          <button id="payment-cancel" class="button button-muted" type="button">Cancel</button>
+          <button class="button" type="submit">Save payment</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="receipt-dialog" class="receipt-dialog" aria-labelledby="receipt-title">
+      <div class="receipt-modal-actions">
+        <button id="receipt-print-button" class="button" type="button">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"/></svg>
+          Print receipt
+        </button>
+        <button id="receipt-close-button" class="button button-muted" type="button">Close</button>
+      </div>
+      <article id="receipt-sheet" class="receipt-sheet">
+        <header class="receipt-header">
+          <p class="eyebrow">Bakery POS</p>
+          <h2 id="receipt-title">Order receipt</h2>
+          <p id="receipt-order-number"></p>
+          <p id="receipt-order-status" class="muted"></p>
+        </header>
+        <dl id="receipt-customer-details" class="receipt-details"></dl>
+        <div class="table-wrap">
+          <table class="receipt-items-table">
+            <thead><tr><th>Item</th><th>Qty</th><th>Amount</th></tr></thead>
+            <tbody id="receipt-items"></tbody>
+          </table>
+        </div>
+        <div id="receipt-totals" class="receipt-totals"></div>
+        <p id="receipt-payment-state" class="receipt-payment-state"></p>
+        <div class="receipt-qr-placeholder">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 48 48"><path d="M4 4h15v15H4zM8 8v7h7V8zM29 4h15v15H29zM33 8v7h7V8zM4 29h15v15H4zM8 33v7h7v-7zM27 27h6v6h-6zM37 27h7v7h-7zM27 38h6v6h-6zM36 39h4v5h-4z"/></svg>
+          <div><strong>Payment QR</strong><p>The shop payment QR image will appear here once provided.</p></div>
+        </div>
+        <p class="receipt-thank-you">Thank you for supporting our bakery!</p>
+      </article>
+    </dialog>
+    <?!= include("Client"); ?>
+  </body>
+</html>

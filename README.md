@@ -1,44 +1,36 @@
-# Offline POS
+# Bakery POS
 
-A lightweight offline point-of-sale project for managing sales, inventory, and transactions without requiring a constant internet connection.
+Cloud-first bakery POS for a small team. The target runtime is Google Apps Script HTML Service, with Google Sheets as the shared operational data store and daily spreadsheet-copy backups in Google Drive.
 
-## Overview
+## Project layout
 
-This project is designed to help small businesses run a simple POS workflow locally, including:
+```text
+.
+├── apps_script/               Deployable Apps Script files and responsive POS screens
+├── docs/ARCHITECTURE.md       Business and data architecture
+├── docs/GOOGLE_APPS_SCRIPT_SETUP.md
+├── src/bakery_pos/            Earlier local Python/SQLite prototype
+├── tests/                     Tests for the local Python/SQLite prototype
+├── data/                      Local SQLite file; not connected to the cloud sheet
+└── pyproject.toml             Local prototype dependencies
+```
 
-- product catalog management
-- sales transactions
-- inventory tracking
-- offline-first operation
-- local data persistence
+The Apps Script project serves the browser app itself, so the browser uses `google.script.run` instead of calling a cross-origin Apps Script API from GitHub Pages. GitHub is for source control; GitHub Pages is not the production app host in this design.
 
-## Features
+## Deploy the cloud app
 
-- Offline sales processing
-- Inventory updates after each transaction
-- Basic reporting and transaction history
-- Simple, easy-to-customize structure for future expansion
+Follow [Google Apps Script deployment](docs/GOOGLE_APPS_SCRIPT_SETUP.md). Create a private master spreadsheet, bind an Apps Script project to it, add the source files from `apps_script/`, run `setupBakeryPos`, then deploy the web app with access restricted to staff Google accounts.
 
-## Project Status
+The cloud app includes Dashboard, New Order, Orders, Products & Add-ons, Suppliers, Stock & Price History, Reports, and Settings & Backup screens. New Order supports tap-to-add catalog cards with separate product sizes, saved-customer lookup by phone, delivery location/fees, and a printable receipt. The receipt's payment QR area is a placeholder until the shop provides its image. It supports USD and KHR without automatic currency conversion. Supplier purchase receipts and quotes are retained for historical unit-cost comparison.
 
-This repository is currently being set up for the Offline POS project.
+## Backup approach
 
-## Getting Started
+An Apps Script daily trigger copies the full master spreadsheet into a private Drive folder and retains the latest 30 days. These are native Google Sheets copies, not SQLite files. They can be inspected and restored in Google Sheets. The current local [SQLite database](data/bakery_pos.sqlite3) is a separate, empty development database; it does not sync from Google Sheets.
 
-1. Clone the repository.
-2. Open the project in your preferred code editor.
-3. Install dependencies if required.
-4. Run the app locally.
+## Important limitations
 
-## Tech Stack
+- The previous Python/SQLite app remains a local prototype; it is not the live shared cloud app.
+- Shared cloud data and the Apps Script UI require internet access. An already-open page can queue supported actions in IndexedDB while offline; those actions are revalidated when connectivity returns.
+- Apps Script quotas and availability are controlled by Google. Check the execution log and `BackupLog`, and test restore procedures before using the system for live sales.
+- Recipe-based ingredient consumption, refunds, and a full accounting workflow are not implemented.
 
-This project can be built with your preferred stack depending on the implementation you plan to use, such as:
-
-- HTML/CSS/JavaScript
-- React
-- Node.js
-- SQLite or local JSON storage
-
-## License
-
-This project is currently under development and may be updated as the application evolves.
