@@ -1,5 +1,13 @@
 const TABLE_SCHEMAS = {
   Settings: ["id", "key", "value", "updated_at"],
+  StaffAccess: [
+    "id", "email", "role", "allowed_pages_json", "active", "created_at", "updated_at",
+    "username", "password", "display_name", "session_version"
+  ],
+  AuditLog: [
+    "id", "occurred_at", "actor_id", "actor_username", "actor_name",
+    "action", "entity_id", "details_json"
+  ],
   Products: [
     "id", "name", "category", "price_usd_minor", "price_khr_minor",
     "inventory_item_id", "active", "created_at", "updated_at", "size"
@@ -58,28 +66,62 @@ const STATUS_TRANSITIONS = {
 };
 
 function setupBakeryPos() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  if (!spreadsheet) {
-    throw new Error("Open this bound Apps Script project from the bakery POS spreadsheet.");
-  }
   const properties = PropertiesService.getScriptProperties();
-  properties.setProperty("SPREADSHEET_ID", spreadsheet.getId());
-
-  let backupFolderId = properties.getProperty("BACKUP_FOLDER_ID");
-  if (!backupFolderId) {
-    const folder = DriveApp.createFolder("Bakery POS Backups");
-    backupFolderId = folder.getId();
-    properties.setProperty("BACKUP_FOLDER_ID", backupFolderId);
+  if (properties.getProperty("POS_SETUP_COMPLETE") === "true") {
+    throw new Error("Bakery POS setup has already completed.");
   }
+  const effectiveEmail = normalizeEmail_(Session.getEffectiveUser().getEmail());
+  if (!effectiveEmail) {
+    throw new Error("Run setupBakeryPos while signed in to the administrator Google account.");
+  }
+  const bootstrapEmail = normalizeEmail_(properties.getProperty("BOOTSTRAP_ADMIN_EMAIL"));
+  if (!bootstrapEmail) {
+    throw new Error("Set BOOTSTRAP_ADMIN_EMAIL to the administrator Google account in Script Properties first.");
+  }
+  if (bootstrapEmail !== effectiveEmail) {
+    throw new Error("Only the initial administrator can run setupBakeryPos.");
+  }
+
+  const activeSpreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const spreadsheetId = activeSpreadsheet
+    ? activeSpreadsheet.getId()
+    : properties.getProperty("SPREADSHEET_ID");
+  if (!spreadsheetId) {
+    throw new Error("Set SPREADSHEET_ID in Script Properties before running setupBakeryPos.");
+  }
+  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  properties.setProperty("SPREADSHEET_ID", spreadsheet.getId());
 
   ensureSchema_();
   ensureDefaultSettings_();
-  installDailyBackupTrigger_();
+  ensureInitialAdmin_(effectiveEmail);
+  properties.setProperty("POS_SETUP_COMPLETE", "true");
   return {
     spreadsheetName: spreadsheet.getName(),
-    backupFolderId: backupFolderId,
     tablesCreated: Object.keys(TABLE_SCHEMAS)
   };
+}
+
+function ensureInitialAdmin_(email) {
+  const existing = readTable_("StaffAccess").find(function(record) {
+    return normalizeEmail_(record.email) === email;
+  });
+  const now = nowIso_();
+  const restoreAdmin = existing &&
+    (existing.role !== "admin" || !isEnabled_(existing.active));
+  upsertRows_("StaffAccess", [{
+    id: existing ? existing.id : email,
+    email: email,
+    role: "admin",
+    allowed_pages_json: JSON.stringify(ALL_PAGE_KEYS_),
+    active: true,
+    created_at: existing ? existing.created_at : now,
+    updated_at: restoreAdmin ? now : (existing ? existing.updated_at : now),
+    username: existing && existing.username ? existing.username : "admin",
+    password: existing ? String(existing.password || "") : "",
+    display_name: existing && existing.display_name ? existing.display_name : "Administrator",
+    session_version: Number(existing && existing.session_version || 0) + (restoreAdmin ? 1 : 0)
+  }]);
 }
 
 function ensureSchema_() {
@@ -122,12 +164,19 @@ function ensureSchemaUnlocked_() {
       sheet.getRange(1, existingColumnCount + 1, 1, newHeaders.length).setFontWeight("bold");
     }
   });
+  const staffSheet = spreadsheet.getSheetByName("StaffAccess");
+  const passwordColumn = TABLE_SCHEMAS.StaffAccess.indexOf("password") + 1;
+  const properties = PropertiesService.getScriptProperties();
+  if (properties.getProperty("STAFF_PASSWORD_TEXT_FORMAT") !== "true") {
+    staffSheet.getRange(1, passwordColumn, staffSheet.getMaxRows(), 1).setNumberFormat("@");
+    properties.setProperty("STAFF_PASSWORD_TEXT_FORMAT", "true");
+  }
 }
 
 function getSpreadsheet_() {
   const spreadsheetId = PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
   if (!spreadsheetId) {
-    throw new Error("Run setupBakeryPos from the bound spreadsheet before opening the app.");
+    throw new Error("Set SPREADSHEET_ID in Script Properties and run setupBakeryPos before opening the app.");
   }
   return SpreadsheetApp.openById(spreadsheetId);
 }
@@ -237,7 +286,7 @@ function safeCellValue_(value) {
   return value;
 }
 
-function runIdempotent_(requestId, action, work) {
+function runIdempotent_(requestId, action, work, actor) {
   ensureSchema_();
   const normalizedRequestId = String(requestId || Utilities.getUuid());
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(normalizedRequestId)) {
@@ -257,6 +306,21 @@ function runIdempotent_(requestId, action, work) {
     }
 
     const result = work(normalizedRequestId);
+    if (actor) {
+      const entityId = result && typeof result === "object"
+        ? String(result.id || result.order_id || normalizedRequestId)
+        : normalizedRequestId;
+      upsertRows_("AuditLog", [{
+        id: "audit_" + normalizedRequestId,
+        occurred_at: nowIso_(),
+        actor_id: actor.id,
+        actor_username: actor.username,
+        actor_name: actor.display_name,
+        action: action,
+        entity_id: entityId,
+        details_json: JSON.stringify({ request_id: normalizedRequestId })
+      }]);
+    }
     upsertRows_("RequestLog", [{
       id: normalizedRequestId,
       request_id: normalizedRequestId,

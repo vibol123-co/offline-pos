@@ -1,19 +1,29 @@
-function getAppData() {
+function getAppData(sessionToken) {
   ensureSchema_();
+  const staff = getCurrentStaff_(sessionToken);
+  const allowed = staff.allowed_pages;
+  const canView = function(page) { return allowed.indexOf(page) !== -1; };
   return {
-    products: readTable_("Products").filter(isActive_),
-    addOns: readTable_("AddOns").filter(isActive_),
-    suppliers: readTable_("Suppliers").filter(isActive_),
-    inventoryItems: readTable_("InventoryItems").filter(isActive_),
-    orders: getRecentOrders_(),
-    stock: getStockSnapshot_(),
+    currentUser: staff,
+    staffAccess: staff.role === "admin" ? listStaffAccess(sessionToken) : [],
+    products: canView("new-order") || canView("products")
+      ? readTable_("Products").filter(isActive_) : [],
+    addOns: canView("new-order") || canView("products")
+      ? readTable_("AddOns").filter(isActive_) : [],
+    suppliers: canView("suppliers") || canView("stock")
+      ? readTable_("Suppliers").filter(isActive_) : [],
+    inventoryItems: canView("stock") || canView("products") || canView("new-order")
+      ? readTable_("InventoryItems").filter(isActive_) : [],
+    orders: canView("dashboard") || canView("orders") ? getRecentOrders_() : [],
+    stock: canView("dashboard") || canView("stock") ? getStockSnapshot_() : [],
     settings: getSettings_(),
-    backup: getBackupStatus_(),
+    backup: canView("settings") ? getBackupStatus_() : [],
     generatedAt: nowIso_()
   };
 }
 
-function findCustomerByPhone(phone) {
+function findCustomerByPhone(phone, sessionToken) {
+  requirePageAccess_(sessionToken, "new-order");
   ensureSchema_();
   const phoneKey = normalizePhoneForMatch_(requiredText_(phone, "phone", 40));
   if (phoneKey.length < 5) {
@@ -42,7 +52,8 @@ function normalizePhoneForMatch_(phone) {
   return String(phone || "").replace(/\D/g, "");
 }
 
-function createProduct(payload, requestId) {
+function createProduct(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "products");
   return runIdempotent_(requestId, "createProduct", function(idempotencyKey) {
     const now = nowIso_();
     const record = {
@@ -68,10 +79,11 @@ function createProduct(payload, requestId) {
     }
     upsertRows_("Products", [record]);
     return record;
-  });
+  }, actor);
 }
 
-function createAddOn(payload, requestId) {
+function createAddOn(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "products");
   return runIdempotent_(requestId, "createAddOn", function(idempotencyKey) {
     const now = nowIso_();
     const record = {
@@ -96,10 +108,11 @@ function createAddOn(payload, requestId) {
     }
     upsertRows_("AddOns", [record]);
     return record;
-  });
+  }, actor);
 }
 
-function createOrder(payload, requestId) {
+function createOrder(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "new-order");
   return runIdempotent_(requestId, "createOrder", function(idempotencyKey) {
     if (!Array.isArray(payload.items) || !payload.items.length) {
       throw new Error("An order must contain at least one item.");
@@ -199,10 +212,11 @@ function createOrder(payload, requestId) {
       }]);
     }
     return getOrder_(orderId);
-  });
+  }, actor);
 }
 
-function updateOrderStatus(orderId, status, requestId) {
+function updateOrderStatus(orderId, status, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "orders");
   return runIdempotent_(requestId, "updateOrderStatus", function(idempotencyKey) {
     const order = findById_("Orders", requiredText_(orderId, "order id", 80));
     if (!order) {
@@ -229,10 +243,11 @@ function updateOrderStatus(orderId, status, requestId) {
       releaseLinkedStock_(orderId, now);
     }
     return getOrder_(orderId);
-  });
+  }, actor);
 }
 
-function recordPayment(orderId, payload, requestId) {
+function recordPayment(orderId, payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "orders");
   return runIdempotent_(requestId, "recordPayment", function(idempotencyKey) {
     const order = findById_("Orders", orderId);
     if (!order || order.status === "cancelled") {
@@ -259,7 +274,7 @@ function recordPayment(orderId, payload, requestId) {
       created_at: now
     }]);
     return getOrder_(orderId);
-  });
+  }, actor);
 }
 
 function getOrder_(orderId) {

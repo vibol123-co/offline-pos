@@ -1,4 +1,5 @@
-function createSupplier(payload, requestId) {
+function createSupplier(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "suppliers");
   return runIdempotent_(requestId, "createSupplier", function(idempotencyKey) {
     const now = nowIso_();
     const supplier = {
@@ -13,10 +14,11 @@ function createSupplier(payload, requestId) {
     };
     upsertRows_("Suppliers", [supplier]);
     return supplier;
-  });
+  }, actor);
 }
 
-function createInventoryItem(payload, requestId) {
+function createInventoryItem(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "stock");
   return runIdempotent_(requestId, "createInventoryItem", function(idempotencyKey) {
     const now = nowIso_();
     const threshold = payload.low_stock_threshold;
@@ -38,10 +40,11 @@ function createInventoryItem(payload, requestId) {
     };
     upsertRows_("InventoryItems", [item]);
     return item;
-  });
+  }, actor);
 }
 
-function recordSupplierPriceQuote(payload, requestId) {
+function recordSupplierPriceQuote(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "stock");
   return runIdempotent_(requestId, "recordSupplierPriceQuote", function(idempotencyKey) {
     const supplier = findById_("Suppliers", requiredText_(payload.supplier_id, "supplier", 80));
     const item = findById_("InventoryItems", requiredText_(payload.inventory_item_id, "stock item", 80));
@@ -65,10 +68,11 @@ function recordSupplierPriceQuote(payload, requestId) {
     }
     upsertRows_("SupplierPriceQuotes", [quote]);
     return quote;
-  });
+  }, actor);
 }
 
-function receiveStock(payload, requestId) {
+function receiveStock(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "stock");
   return runIdempotent_(requestId, "receiveStock", function(idempotencyKey) {
     if (!Array.isArray(payload.lines) || !payload.lines.length) {
       throw new Error("A stock receipt must contain at least one line.");
@@ -130,10 +134,11 @@ function receiveStock(payload, requestId) {
       };
     }));
     return receipt;
-  });
+  }, actor);
 }
 
-function adjustStock(payload, requestId) {
+function adjustStock(payload, requestId, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "stock");
   return runIdempotent_(requestId, "adjustStock", function(idempotencyKey) {
     const item = findById_(
       "InventoryItems",
@@ -166,15 +171,17 @@ function adjustStock(payload, requestId) {
     };
     upsertRows_("StockMovements", [movement]);
     return movement;
-  });
+  }, actor);
 }
 
-function getStockSnapshot() {
+function getStockSnapshot(sessionToken) {
+  requirePageAccess_(sessionToken, "stock");
   ensureSchema_();
   return getStockSnapshot_();
 }
 
-function getPriceHistory(inventoryItemId) {
+function getPriceHistory(inventoryItemId, sessionToken) {
+  requirePageAccess_(sessionToken, "stock");
   ensureSchema_();
   const item = findById_("InventoryItems", requiredText_(inventoryItemId, "stock item", 80));
   if (!item) {
@@ -265,7 +272,8 @@ function getSettings_() {
   };
 }
 
-function updateSettings(payload, requestId) {
+function updateSettings(payload, requestId, sessionToken) {
+  const actor = requireAdmin_(sessionToken);
   return runIdempotent_(requestId, "updateSettings", function() {
     const currency = choice_(payload.default_currency, ["USD", "KHR"], "default currency");
     const taxRate = Number(payload.tax_rate_basis_points);
@@ -283,7 +291,7 @@ function updateSettings(payload, requestId) {
       }
     ]);
     return getSettings_();
-  });
+  }, actor);
 }
 
 function getBackupStatus_() {

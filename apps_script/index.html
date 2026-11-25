@@ -11,14 +11,29 @@
         <h1>Bakery POS</h1>
       </div>
       <div class="topbar-actions">
+        <span id="user-label" class="user-label" hidden></span>
         <span id="connection-status" class="connection-status">Connecting…</span>
-        <button id="refresh-button" class="button button-muted icon-button" type="button" aria-label="Refresh data" title="Refresh data">
+        <button id="switch-account-button" class="button button-muted" type="button" hidden>Switch user</button>
+        <button id="refresh-button" class="button button-muted icon-button" type="button" aria-label="Refresh data" title="Refresh data" hidden>
           <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg>
         </button>
       </div>
     </header>
 
-    <main class="app-shell">
+    <section id="sign-in-panel" class="panel sign-in-panel">
+      <h2>Sign in to Bakery POS</h2>
+      <p class="muted">Connect the shop Google account on this device, then sign in with your POS username and password.</p>
+      <button id="sign-in-button" class="button" type="button">Connect shop Google account</button>
+      <form id="staff-login-form" class="form-grid staff-login-form" hidden>
+        <label>Username<input name="username" autocomplete="username" maxlength="40" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+        <button class="button span-all" type="submit">Sign in</button>
+      </form>
+      <button id="change-google-account" class="button button-muted" type="button" hidden>Use a different Google account</button>
+      <p id="sign-in-error" class="notice error" role="alert" hidden></p>
+    </section>
+
+    <main id="app-shell" class="app-shell" hidden>
       <nav class="navigation" aria-label="Main navigation">
         <button class="nav-button active" data-screen="dashboard">Dashboard</button>
         <button class="nav-button" data-screen="new-order">New order</button>
@@ -331,6 +346,10 @@
           <button class="button" type="submit">Run report</button>
         </form>
         <div id="report-results" class="kpi-grid"></div>
+        <article class="panel">
+          <h3>Staff activity</h3>
+          <div id="report-activity" class="table-wrap"></div>
+        </article>
       </section>
 
       <section id="screen-settings" class="screen" hidden>
@@ -350,6 +369,37 @@
             <div id="backup-log" class="compact-list"></div>
           </article>
         </div>
+        <section id="staff-access-section" class="panel staff-access-section" hidden>
+          <div class="screen-heading">
+            <div><p class="eyebrow">Team permissions</p><h3>POS user accounts</h3></div>
+          </div>
+          <p class="muted">Manage POS usernames, passwords, roles, and cashier page access. Passwords are visible to admins.</p>
+          <form id="staff-access-form" class="form-grid staff-access-form">
+            <input name="id" type="hidden">
+            <label>Username<input name="username" autocomplete="off" required minlength="3" maxlength="40" pattern="[A-Za-z0-9._-]+"></label>
+            <label>Staff name<input name="display_name" autocomplete="off" required maxlength="120"></label>
+            <label>Password<input name="password" type="text" autocomplete="off" required minlength="4" maxlength="128"></label>
+            <label>Role
+              <select name="role"><option value="cashier">Cashier</option><option value="admin">Admin</option></select>
+            </label>
+            <fieldset class="span-all staff-page-options">
+              <legend>Cashier page access</legend>
+              <label><input type="checkbox" name="allowed_pages" value="dashboard">Dashboard</label>
+              <label><input type="checkbox" name="allowed_pages" value="new-order">New order</label>
+              <label><input type="checkbox" name="allowed_pages" value="orders">Orders</label>
+              <label><input type="checkbox" name="allowed_pages" value="products">Products & add-ons</label>
+              <label><input type="checkbox" name="allowed_pages" value="suppliers">Suppliers</label>
+              <label><input type="checkbox" name="allowed_pages" value="stock">Stock & price history</label>
+              <label><input type="checkbox" name="allowed_pages" value="reports">Reports</label>
+            </fieldset>
+            <label class="staff-active-control"><input name="active" type="checkbox" checked>Account enabled</label>
+            <div class="span-all form-actions">
+              <button class="button" type="submit">Save staff access</button>
+              <button id="staff-access-clear" class="button button-muted" type="button">Clear form</button>
+            </div>
+          </form>
+          <div id="staff-access-list" class="table-wrap"></div>
+        </section>
       </section>
     </main>
     <dialog id="payment-dialog" class="payment-dialog">
@@ -398,6 +448,8 @@
         <p class="receipt-thank-you">Thank you for supporting our bakery!</p>
       </article>
     </dialog>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="config.js"></script>
     <?!= include("Client"); ?>
   </body>
 </html>

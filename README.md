@@ -1,36 +1,30 @@
 # Bakery POS
 
-Cloud-first bakery POS for a small team. The target runtime is Google Apps Script HTML Service, with Google Sheets as the shared operational data store and daily spreadsheet-copy backups in Google Drive.
+Responsive bakery POS for a small team. The approved target architecture is GitHub Pages for the interface, a directly-called Google Apps Script API for business/data operations, Google Sheets as the shared data store, and a separate owner-only Apps Script project for daily Drive backups.
 
 ## Project layout
 
 ```text
 .
-├── apps_script/               Deployable Apps Script files and responsive POS screens
-├── docs/ARCHITECTURE.md       Business and data architecture
-├── docs/GOOGLE_APPS_SCRIPT_SETUP.md
-├── src/bakery_pos/            Earlier local Python/SQLite prototype
-├── tests/                     Tests for the local Python/SQLite prototype
-├── data/                      Local SQLite file; not connected to the cloud sheet
-└── pyproject.toml             Local prototype dependencies
+├── apps_script/                   POS API source and GitHub Pages HTML/CSS/JS inputs
+├── apps_script_backup/            Owner-only backup project source
+├── scripts/build_github_pages.py  Static site builder
+├── .github/workflows/             GitHub Pages deployment workflow
+├── docs/ARCHITECTURE.md           Architecture and implementation status
+├── docs/DEPLOYMENT.md             Required Google and GitHub setup
+├── src/bakery_pos/                Separate local Python/SQLite prototype
+├── tests/                          Tests for the local prototype
+└── data/                           Local SQLite file; not connected to Sheets
 ```
 
-The Apps Script project serves the browser app itself, so the browser uses `google.script.run` instead of calling a cross-origin Apps Script API from GitHub Pages. GitHub is for source control; GitHub Pages is not the production app host in this design.
+The browser uses `DataService` to call the Apps Script Execution API directly. The POS API project does not host the interface and does not have Drive or trigger scopes. The separate backup project owns the daily trigger and Drive access. The Python/SQLite prototype is not synchronized with the cloud POS.
 
-## Deploy the cloud app
+## Deploy
 
-Follow [Google Apps Script deployment](docs/GOOGLE_APPS_SCRIPT_SETUP.md). Create a private master spreadsheet, bind an Apps Script project to it, add the source files from `apps_script/`, run `setupBakeryPos`, then deploy the web app with access restricted to staff Google accounts.
+The cloud setup has not been completed from this worktree. Follow [GitHub Pages and Apps Script setup](docs/DEPLOYMENT.md) before publishing. The GitHub Actions workflow builds from `apps_script/index.html`, `Styles.html`, and `Client.html`; configure the repository variables for the OAuth Web client ID and API-executable deployment ID before deploying Pages.
 
-The cloud app includes Dashboard, New Order, Orders, Products & Add-ons, Suppliers, Stock & Price History, Reports, and Settings & Backup screens. New Order supports tap-to-add catalog cards with separate product sizes, saved-customer lookup by phone, delivery location/fees, and a printable receipt. The receipt's payment QR area is a placeholder until the shop provides its image. It supports USD and KHR without automatic currency conversion. Supplier purchase receipts and quotes are retained for historical unit-cost comparison.
+## Features and limitations
 
-## Backup approach
+The POS includes Dashboard, New Order, Orders, Products & Add-ons, Suppliers, Stock & Price History, Reports, and Settings screens. Staff use admin-managed POS usernames/passwords; admins can view passwords, assign roles/pages, and review the activity audit log. Successful changes are attributed to the signed-in POS user. The shop Google account still authorizes the API in each device browser; this is lightweight attribution, not strong security separation. The app supports walk-in, advance, and custom-cake orders; saved-customer lookup; payments; USD/KHR pricing without automatic conversion; and role-based page access. Writes run asynchronously with visible progress/completion messages. An already-open browser page can queue supported actions in IndexedDB while offline; those actions are not shared until successfully synchronized.
 
-An Apps Script daily trigger copies the full master spreadsheet into a private Drive folder and retains the latest 30 days. These are native Google Sheets copies, not SQLite files. They can be inspected and restored in Google Sheets. The current local [SQLite database](data/bakery_pos.sqlite3) is a separate, empty development database; it does not sync from Google Sheets.
-
-## Important limitations
-
-- The previous Python/SQLite app remains a local prototype; it is not the live shared cloud app.
-- Shared cloud data and the Apps Script UI require internet access. An already-open page can queue supported actions in IndexedDB while offline; those actions are revalidated when connectivity returns.
-- Apps Script quotas and availability are controlled by Google. Check the execution log and `BackupLog`, and test restore procedures before using the system for live sales.
-- Recipe-based ingredient consumption, refunds, and a full accounting workflow are not implemented.
-
+Daily backups are Google Sheets copies in Drive, not SQLite files. Page access in the POS does not prevent spreadsheet Editors from opening the Sheet directly. Recipe-based ingredient consumption, refunds, and full accounting workflows are not implemented.

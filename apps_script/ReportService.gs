@@ -1,4 +1,5 @@
-function getReports(payload) {
+function getReports(payload, sessionToken) {
+  const actor = requirePageAccess_(sessionToken, "reports");
   ensureSchema_();
   const from = payload && payload.from ? new Date(payload.from) : null;
   const to = payload && payload.to ? new Date(payload.to) : null;
@@ -20,6 +21,15 @@ function getReports(payload) {
     totals[order.currency].sales_minor += Number(order.total_minor || 0);
   });
   const movements = readTable_("StockMovements");
+  const activity = actor.role === "admin"
+    ? readTable_("AuditLog").filter(function(entry) {
+      const occurred = new Date(entry.occurred_at).getTime();
+      return (!from || occurred >= from.getTime()) &&
+        (!to || occurred < to.getTime() + 24 * 60 * 60 * 1000);
+    }).sort(function(left, right) {
+      return String(right.occurred_at).localeCompare(String(left.occurred_at));
+    }).slice(0, 200)
+    : [];
   return {
     totals: totals,
     order_count: orders.length,
@@ -28,6 +38,7 @@ function getReports(payload) {
       const occurred = new Date(movement.occurred_at).getTime();
       return (!from || occurred >= from.getTime()) &&
         (!to || occurred < to.getTime() + 24 * 60 * 60 * 1000);
-    }).length
+    }).length,
+    staff_activity: activity
   };
 }

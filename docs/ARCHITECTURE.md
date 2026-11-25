@@ -1,72 +1,61 @@
-# Bakery POS: Cloud Architecture
+# Bakery POS architecture
 
-**Status:** Apps Script source and responsive screens are in the workspace; local mocked browser smoke tests pass, while Google account setup, deployment, and live Sheet validation remain required.  
-**Business:** One small bakery, one to three staff, PC/iPad/Android, USD and KHR, bakery items and add-ons, walk-in/advance/custom-cake orders, suppliers, and stock-cost history.
-
-## Architecture decision
+## Approved direction
 
 ```text
 PC / iPad / Android browser
         ↓
-Apps Script HTML Service (responsive HTML/CSS/JS)
-        ↓ google.script.run
-Client DataService → Apps Script domain services
+GitHub Pages (static HTML, CSS, JavaScript)
+        ↓ OAuth access token; Google Apps Script Execution API
+Apps Script POS API (business rules and authorization)
         ↓
-Google Sheets (shared operational source of truth)
-        ├── IndexedDB snapshot/outbox on an already-open device page
-        └── Daily Apps Script trigger → dated Drive spreadsheet copies
+Google Sheets (shared operational data)
+
+Separate owner-only Apps Script project
+        ↓ daily trigger; Drive scope
+Google Drive (dated spreadsheet-copy backups)
 ```
 
-Apps Script hosts the UI and backend together. This avoids the GitHub Pages-to-Apps-Script cross-origin problem. The GitHub repository remains the source-control location; GitHub Pages is not the application host. Apps Script deployment requires an owner-provided Google spreadsheet, staff account access, authorization, and a deployment URL.
+GitHub Pages is the UI host. The UI calls Apps Script directly through Google's Execution API; there is no Cloudflare proxy or other middle service. Apps Script owns validation, business rules, POS-session checks, page authorization, and all Sheet access. The browser communicates with it through `DataService`; browser code does not read or write Sheets directly. The local Python/SQLite prototype remains separate and is not synchronized.
 
-The earlier Python/SQLite implementation remains a local prototype only. It is not the shared cloud data path and does not receive Sheet updates. A later Python export/import tool can create a local SQLite database from an export if needed.
+The client uses Google Identity Services to obtain an access token for the shop's Google account. Staff then sign in to the POS with usernames and passwords managed by an admin in the `StaffAccess` sheet; staff do not need individual Google accounts. Google requires the Apps Script API to be enabled, a standard Google Cloud project linked to the Apps Script project, and the OAuth client and Apps Script project to use that same Cloud project. The browser origin must be authorized in the OAuth client. See [DEPLOYMENT.md](./DEPLOYMENT.md).
 
-## Service and storage boundaries
+## Responsibilities
 
-- **Screens:** Dashboard, New Order with tap-to-add product cards, separated checkout totals, and a printable receipt, Orders, Products & Add-ons, Suppliers, Stock & Price History, Reports, and Settings & Backup. The receipt QR area is a placeholder until the shop provides its payment image.
-- **Browser `DataService`:** Uses `google.script.run` for all server requests, including phone-based customer lookup; screens do not use Google Sheet APIs directly.
-- **Apps Script domain functions:** Validate data, compute order totals, update fulfillment/payment records, receive stock, record quotes, and prepare reports.
-- **Sheet repository:** Owns the tab schema, stable IDs, update/append helpers, locking, and idempotency log.
-- **Google Sheets:** Shared online source of truth. All staff should access data through the app; do not hand-edit data tabs.
-- **Google Drive:** Stores dated copies of the master spreadsheet. No daily SQLite file is produced.
+- **Static client:** Responsive POS screens, shop-account connection, POS username/password sign-in, progress/completion messages, navigation, and a per-device IndexedDB outbox for supported actions queued while an already-open page is offline.
+- **`DataService`:** The only client-side interface to Apps Script functions. It sends `scripts.run` requests and attaches request IDs to mutations. Screens do not call `fetch` to business endpoints or access localStorage.
+- **Apps Script POS API:** Validates POS credentials, issues short-lived sessions, enforces page/admin permissions on each protected entry point, records mutation attribution, calculates order totals, manages order/payment/inventory/report behavior, and reads/writes Sheets.
+- **Google Sheets:** Shared source of truth for orders, products, add-ons, plaintext POS credentials and page permissions in `StaffAccess`, inventory, supplier pricing, and `AuditLog`.
+- **Owner-only backup project:** Uses separate Drive and trigger scopes to create daily dated copies and update the operational spreadsheet's `BackupLog`. Cashiers do not use this project.
 
-`LockService` serializes mutations across staff and devices. Mutating requests use stable request IDs so a retried browser action does not create duplicate orders, payments, purchases, or stock movements. Sheets are not transactional; the implementation validates all order/purchase lines before writing and keeps the data set modest.
+All online writes are asynchronous and leave the page in place. The interface displays progress and a result. Open clients refresh periodically; this is polling, not push synchronization. Apps Script and Sheets require internet access. Offline support is limited to queueing supported actions on an already-open page; a fresh offline launch and offline reads are not supported.
 
-## Business data
+## Roles and access
 
-- **Products and add-ons:** Stable IDs, active state, and independent USD/KHR prices in integer minor units (USD cents; KHR whole riel). Bakery products can have a catalog size/option, so each size is selected and priced as its own item. An optional link to a finished-product or accessory stock item enables stock reservation.
-- **Orders and order lines:** Customer/contact details, location, delivery fee, walk-in/advance/custom-cake type, walk-in/Grab/other channel, pickup/delivery fulfillment, pickup time, currency, price snapshots, tax/discount, notes, custom-cake details, and retained status history. Delivery fees are included in totals; configured tax applies to discounted items, not the delivery fee.
-- **Payments:** Cash/card-terminal/other records, deposits, amount paid, and remaining balance. No card credentials are collected.
-- **Suppliers:** Contact details and status.
-- **Inventory items:** Separate ingredient, packaging, finished-product, and accessory records with base units and low-stock threshold.
-- **Purchase receipts and lines:** Supplier, received date, quantity in base units, total cost, and purchase currency. A quote table separately records supplier offers. Together these support unit-cost comparisons over time and by currency.
-- **Stock movements:** Append-only receipts, sales reservations, cancellation releases, waste, and adjustments. On-hand is derived from movements rather than overwritten. Linked finished goods/add-ons reserve on order creation and are released on cancellation.
+- **Admin:** All POS pages; can configure staff roles, page access, and settings.
+- **Cashier:** Only pages explicitly assigned by an admin. Settings and staff administration are excluded.
+- Apps Script checks the active POS session and staff role on protected API calls; the client also hides pages the account cannot use. Admins can read passwords in the staff-management screen and Sheet, as requested. Cashiers should not be given direct access to the operational spreadsheet.
+- The main Google account must be connected in each shop browser, then staff use their POS credentials. `StaffAccess` passwords are intentionally plaintext, so Sheet owners/editors and backup-file readers can see them. Do not reuse Google or personal passwords.
+- This is a lightweight staff attribution/login layer, not strong isolation: API calls run under the shop Google account, whose OAuth token is present in the browser. Anyone with access to a signed-in shop device may be able to act with that Google account's access outside the POS. A dedicated shop Google account limits exposure.
 
-No automatic FX conversion is applied. USD and KHR price series remain separate unless the business later chooses to store exchange rates. Ingredient recipe consumption is not implemented; production use, waste, and corrections must currently be entered as explicit stock movements.
+## Staff activity history
 
-## Live and offline behavior
+Successful POS mutations create an append-only `AuditLog` row containing server time, staff ID/name, action, and affected record/request ID. The Reports screen shows recent activity to admins for the selected date range. Passwords are not copied into `AuditLog` or mutation `RequestLog` results. A password change or account disable invalidates existing POS sessions; sessions otherwise expire after six hours or earlier if Apps Script evicts its cache entry.
 
-Online writes are immediately saved to the shared spreadsheet, then other open pages poll for changes every 30 seconds. This is near-live request/refresh behavior, not a WebSocket push stream. Apps Script and Sheets require internet connectivity.
+## Backups
 
-An already-open client page keeps a last-read snapshot and can queue supported mutations in IndexedDB while it detects an outage. On reconnect, the server validates queued actions again. Stock availability or a catalog price may have changed, so queued actions can require review. The Apps Script page itself is not guaranteed to open while the device is offline; this is not equivalent to a fully offline PWA.
+The backup project is separate from the POS API project so normal staff are not asked to authorize Drive or trigger-management scopes. The owner sets its `SPREADSHEET_ID` and existing `BACKUP_FOLDER_ID`, then runs `setupBakeryBackup()` once. It installs a daily trigger (around 2:00 AM in the project timezone), makes dated spreadsheet copies, retains the configured number of days (30 by default), and logs runs in `BackupLog`.
 
-## Backup and recovery
+Backups are Google Sheets copies in Drive, not SQLite files. Verify a new backup and trigger before disabling the old project's backup trigger. Recovery requires restoring the needed tabs from a dated copy. If a standalone SQLite backup becomes a requirement, implement a separate export/import process; the existing local prototype is not a backup destination.
 
-`setupBakeryPos` creates a restricted `Bakery POS Backups` Drive folder and a daily time-driven trigger (around 2:00 AM, project timezone). Each successful run makes a full, dated copy of the master spreadsheet; the default retention is 30 days. `BackupLog` records results. Older copies are moved to Trash.
+## Business data and behavior
 
-This is a native spreadsheet-copy backup, not `.sqlite3`. Recovery means opening a dated copy and restoring its tabs into the master spreadsheet before resuming sales. Restore should be rehearsed before live use. If a local SQLite file is later required, export the sheet data and use a Python importer; the local database currently in the workspace is not synchronized.
+- Bakery products and add-ons have stable IDs, active state, and independent USD/KHR prices. Amounts are stored as integer minor units (USD cents; KHR whole riel).
+- Orders support walk-in, advance, and custom-cake details; pickup/delivery; customer contact/location; payment records; and status history.
+- Suppliers, inventory items, purchase receipts, stock movements, and supplier price quotes support on-hand stock and price history. Stock is derived from movements; linked finished goods/add-ons can be reserved and released with order state.
+- No automatic currency conversion or recipe-based ingredient consumption is implemented. No card credentials are collected.
+- Server mutations use locking and request IDs for safe retries; Google Sheets itself is not a transactional database.
 
-## Security and operations
+## Current delivery status
 
-- Restrict the web app to staff Google accounts; never deploy for anonymous access.
-- Prefer execution as the accessing user and share the sheet only with staff. If the deployment model changes, review its authorization scope before release.
-- Keep Apps Script source in GitHub, but do not put account tokens, personal data, or service credentials in the client or repository.
-- Apps Script/Sheets quotas and availability are Google-managed. Monitor **Apps Script > Executions**, inspect `BackupLog`, and test restore and stock reconciliation.
-- Full Google deployment and live multi-device testing cannot be completed until the owner creates the spreadsheet and authorizes/deploys the Apps Script project.
-
-## Delivery status
-
-1. **Foundation:** Apps Script schema, request handling, order/payment, supplier, purchase, stock movement, price history, report, and backup services.
-2. **Screens:** Responsive app sections for the eight screens above; real account deployment and multi-device UI testing remain pending.
-3. **Operational validation:** Test staff permissions, multi-device order updates, duplicate request handling, stock reserve/release, USD/KHR totals, backup trigger, and restoration.
-4. **Later:** Payment QR image integration, recipe-based ingredient usage, refund workflow, automated local SQLite export/import, and stronger offline application-shell support.
+Local source now contains the direct API client, POS credential sessions, role checks, staff activity audit, a separate backup project, and a GitHub Pages build/deployment workflow. The live Apps Script project, OAuth client, API-executable deployment, GitHub Pages site, and replacement backup trigger have **not** been configured or deployed from this worktree. Complete the manual setup and smoke tests in [DEPLOYMENT.md](./DEPLOYMENT.md) before publishing or switching the existing trigger.

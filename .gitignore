@@ -9,3 +9,4 @@ data/*.sqlite3-shm
 data/*.sqlite3-wal
 credentials/
 service-account*.json
+site/

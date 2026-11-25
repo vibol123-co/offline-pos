@@ -1,35 +1,36 @@
 <script>
   const State = { data: null, cart: [], activeScreen: "dashboard", loading: false, orderCurrency: "USD" };
   const CURRENCY_EXPONENTS = { USD: 2, KHR: 0 };
-  const DATABASE_NAME = "bakery-pos-offline";
+  const DATABASE_NAME = "bakery-pos-github";
+  const API_CONFIG = window.BAKERY_POS_CONFIG || {};
+  const API_SCOPES = [
+    "https://www.googleapis.com/auth/script.projects",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/script.scriptapp"
+  ].join(" ");
   let databasePromise;
   let refreshTimer;
   let customerLookupTimer;
   let customerLookupSequence = 0;
   let matchedCustomer;
+  let tokenClient;
+  let tokenRequest;
+  let accessToken = "";
+  let accessTokenExpiresAt = 0;
+  let firstTokenRequest = true;
+  let staffSessionToken = "";
 
   const DataService = Object.freeze({
+    loginStaff(username, password) {
+      return callServer_("loginStaff", [username, password]);
+    },
+    logoutStaff() {
+      return callServer_("logoutStaff", []);
+    },
     async getAppData() {
-      try {
-        const data = await callServer_("getAppData", []);
-        try {
-          await storeCache_(data);
-        } catch (cacheError) {
-          window.dispatchEvent(new CustomEvent("bakery:cache-error", {
-            detail: { message: cacheError.message }
-          }));
-        }
-        return data;
-      } catch (error) {
-        if (!navigator.onLine) {
-          const cached = await readCache_();
-          if (cached) {
-            cached.offline = true;
-            return cached;
-          }
-        }
-        throw error;
-      }
+      return callServer_("getAppData", []);
     },
     getReports(payload) {
       return callServer_("getReports", [payload]);
@@ -73,8 +74,11 @@
     updateSettings(payload) {
       return mutate_("updateSettings", [payload]);
     },
-    createBackup() {
-      return callServer_("createDailyDriveBackup", []);
+    listStaffAccess() {
+      return callServer_("listStaffAccess", []);
+    },
+    updateStaffAccess(payload) {
+      return mutate_("updateStaffAccess", [payload]);
     },
     async getPendingActions() {
       const db = await openDatabase_();
@@ -84,7 +88,11 @@
     },
     async flushPendingActions() {
       if (!navigator.onLine) return;
-      const actions = (await this.getPendingActions()).sort(function(a, b) {
+      const currentStaffId = State.data && State.data.currentUser
+        ? State.data.currentUser.id : "";
+      const actions = (await this.getPendingActions()).filter(function(action) {
+        return currentStaffId && action.created_by === currentStaffId;
+      }).sort(function(a, b) {
         return a.created_at.localeCompare(b.created_at);
       });
       for (const action of actions) {
@@ -103,17 +111,106 @@
   });
 
   function callServer_(method, args) {
-    return new Promise(function(resolve, reject) {
-      try {
-        const runner = google.script.run
-          .withSuccessHandler(resolve)
-          .withFailureHandler(function(error) {
-            reject(new Error(error && error.message ? error.message : "The request failed."));
+    if (method !== "loginStaff" && !staffSessionToken) {
+      return Promise.reject(new Error("Sign in to Bakery POS and try again."));
+    }
+    const parameters = method === "loginStaff"
+      ? args
+      : args.concat([staffSessionToken]);
+    return getAccessToken_().then(function(token) {
+      const endpoint = "https://script.googleapis.com/v1/scripts/" +
+        encodeURIComponent(API_CONFIG.apiDeploymentId) + ":run";
+      return fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ function: method, parameters: parameters })
+      });
+    }).then(function(response) {
+      return response.json().then(function(result) {
+        if (!response.ok) {
+          throw new Error(result.error && result.error.message
+            ? result.error.message : "The Google Apps Script API request failed.");
+        }
+        if (result.error) {
+          const details = result.error.details || [];
+          const message = details.length && details[0].errorMessage
+            ? details[0].errorMessage : result.error.message;
+          throw new Error(message || "The Apps Script function failed.");
+        }
+        return result.response ? result.response.result : undefined;
+      });
+    });
+  }
+
+  function getAccessToken_() {
+    if (accessToken && Date.now() < accessTokenExpiresAt - 360000) {
+      return Promise.resolve(accessToken);
+    }
+    if (tokenRequest) return tokenRequest;
+    if (!API_CONFIG.oauthClientId || !API_CONFIG.apiDeploymentId) {
+      return Promise.reject(new Error(
+        "The POS Google API settings are not configured. Contact the administrator."
+      ));
+    }
+    tokenRequest = waitForGoogleIdentity_().then(function() {
+      return new Promise(function(resolve, reject) {
+        if (!tokenClient) {
+          tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: API_CONFIG.oauthClientId,
+            scope: API_SCOPES,
+            callback: function(response) {
+              if (response.error || !response.access_token) {
+                reject(new Error(response.error_description || response.error ||
+                  "Google sign-in was not completed."));
+                return;
+              }
+              accessToken = response.access_token;
+              accessTokenExpiresAt = Date.now() + Number(response.expires_in || 3600) * 1000;
+              firstTokenRequest = false;
+              resolve(accessToken);
+            },
+            error_callback: function(error) {
+              reject(new Error(error && error.message
+                ? error.message : "Google sign-in was not completed."));
+            }
           });
-        runner[method].apply(runner, args);
-      } catch (error) {
-        reject(error);
-      }
+        } else {
+          tokenClient.callback = function(response) {
+            if (response.error || !response.access_token) {
+              reject(new Error(response.error_description || response.error ||
+                "Google sign-in was not completed."));
+              return;
+            }
+            accessToken = response.access_token;
+            accessTokenExpiresAt = Date.now() + Number(response.expires_in || 3600) * 1000;
+            firstTokenRequest = false;
+            resolve(accessToken);
+          };
+        }
+        tokenClient.requestAccessToken({ prompt: firstTokenRequest ? "select_account" : "" });
+      });
+    }).finally(function() {
+      tokenRequest = null;
+    });
+    return tokenRequest;
+  }
+
+  function waitForGoogleIdentity_() {
+    return new Promise(function(resolve, reject) {
+      const startedAt = Date.now();
+      const poll = function() {
+        if (window.google && google.accounts && google.accounts.oauth2) {
+          resolve();
+        } else if (Date.now() - startedAt > 10000) {
+          reject(new Error("Google sign-in could not load. Check your internet connection."));
+        } else {
+          window.setTimeout(poll, 100);
+        }
+      };
+      poll();
     });
   }
 
@@ -123,12 +220,13 @@
     try {
       return await callServer_(method, callArgs);
     } catch (error) {
-      if (!navigator.onLine) {
+      if (!navigator.onLine && State.data && State.data.currentUser) {
         const action = {
           request_id: requestId,
           method: method,
           args: callArgs,
           preview: preview || null,
+          created_by: State.data.currentUser.id,
           created_at: new Date().toISOString()
         };
         await putQueuedAction_(action);
@@ -154,9 +252,6 @@
         const db = request.result;
         if (!db.objectStoreNames.contains("outbox")) {
           db.createObjectStore("outbox", { keyPath: "request_id" });
-        }
-        if (!db.objectStoreNames.contains("cache")) {
-          db.createObjectStore("cache", { keyPath: "id" });
         }
       };
       request.onsuccess = function() { resolve(request.result); };
@@ -189,21 +284,6 @@
     });
   }
 
-  async function storeCache_(data) {
-    const db = await openDatabase_();
-    return transactionRequest_(db, "cache", "readwrite", function(store) {
-      return store.put({ id: "latest", data: data, saved_at: new Date().toISOString() });
-    });
-  }
-
-  async function readCache_() {
-    const db = await openDatabase_();
-    const record = await transactionRequest_(db, "cache", "readonly", function(store) {
-      return store.get("latest");
-    });
-    return record ? record.data : null;
-  }
-
   function byId(id) { return document.getElementById(id); }
   function text(element, value) { element.textContent = value == null ? "" : String(value); }
   function element(tag, className, value) {
@@ -213,10 +293,13 @@
     return node;
   }
 
-  function showNotice(message, isError) {
+  function showNotice(message, isError, isLoading) {
     const notice = byId("notice");
-    text(notice, message);
+    notice.replaceChildren();
+    if (isLoading) notice.append(element("span", "inline-spinner"));
+    notice.append(document.createTextNode(message));
     notice.classList.toggle("error", Boolean(isError));
+    notice.classList.toggle("loading", Boolean(isLoading));
   }
 
   function moneyFromMinor(amountMinor, currency) {
@@ -247,28 +330,41 @@
   function setConnectionState(offline) {
     const status = byId("connection-status");
     status.classList.toggle("offline", offline);
-    text(status, offline ? "Offline / cached data" : "Connected to shop data");
+    status.classList.remove("pending");
+    text(status, offline ? "Offline (current session only)" : "Connected to shop data");
     byId("offline-banner").hidden = !offline;
   }
 
+  function setSignedOutStatus_() {
+    const status = byId("connection-status");
+    status.classList.remove("offline");
+    status.classList.add("pending");
+    text(status, "Sign in required");
+    byId("offline-banner").hidden = true;
+  }
+
   async function refreshData(silent) {
-    if (State.loading) return;
+    if (State.loading) return false;
     State.loading = true;
     try {
       State.data = await DataService.getAppData();
-      setConnectionState(Boolean(State.data.offline) || !navigator.onLine);
+      setConnectionState(!navigator.onLine);
       renderAll();
-      if (!silent) showNotice(State.data.offline ? "Showing the last saved device snapshot." : "Data refreshed.");
+      if (!silent) showNotice("Data refreshed.");
       await updateQueueStatus();
+      return true;
     } catch (error) {
       setConnectionState(true);
       showNotice(error.message, true);
+      return false;
     } finally {
       State.loading = false;
     }
   }
 
   function showScreen(name) {
+    const user = State.data && State.data.currentUser;
+    if (user && user.allowed_pages.indexOf(name) === -1) return;
     State.activeScreen = name;
     document.querySelectorAll(".screen").forEach(function(screen) {
       screen.hidden = screen.id !== "screen-" + name;
@@ -283,6 +379,7 @@
 
   function renderAll() {
     if (!State.data) return;
+    applyPageAccess_();
     renderDashboard();
     renderOrders();
     renderProducts();
@@ -298,6 +395,32 @@
     renderItemCards();
     renderCart();
     renderOrderTotals();
+  }
+
+  function applyPageAccess_() {
+    const user = State.data.currentUser;
+    const allowed = user && Array.isArray(user.allowed_pages) ? user.allowed_pages : [];
+    document.querySelectorAll(".nav-button").forEach(function(button) {
+      button.hidden = allowed.indexOf(button.dataset.screen) === -1;
+    });
+    document.querySelectorAll(".screen").forEach(function(screen) {
+      const page = screen.id.replace("screen-", "");
+      screen.hidden = allowed.indexOf(page) === -1 || page !== State.activeScreen;
+    });
+    const userLabel = byId("user-label");
+    text(userLabel, user
+      ? (user.display_name || user.username) + " · " + (user.role === "admin" ? "Admin" : "Cashier")
+      : "");
+    userLabel.hidden = !user;
+    if (allowed.indexOf(State.activeScreen) === -1) {
+      State.activeScreen = allowed[0] || "";
+      document.querySelectorAll(".screen").forEach(function(screen) {
+        screen.hidden = screen.id !== "screen-" + State.activeScreen;
+      });
+    }
+    document.querySelectorAll(".nav-button").forEach(function(button) {
+      button.classList.toggle("active", button.dataset.screen === State.activeScreen);
+    });
   }
 
   function renderDashboard() {
@@ -520,6 +643,10 @@
     const settings = State.data.settings || {};
     byId("settings-form").elements.default_currency.value = settings.default_currency || "USD";
     byId("settings-form").elements.tax_rate_basis_points.value = settings.tax_rate_basis_points || 0;
+    const isAdmin = State.data.currentUser && State.data.currentUser.role === "admin";
+    byId("settings-form").hidden = !isAdmin;
+    byId("staff-access-section").hidden = !isAdmin;
+    if (isAdmin) renderStaffAccess_(State.data.staffAccess || []);
     const backup = (State.data.backup || [])[0];
     text(byId("backup-last-run"), backup
       ? "Last backup: " + backup.created_at + " · " + backup.status + (backup.file_name ? " · " + backup.file_name : "")
@@ -527,6 +654,62 @@
     renderSimpleRows(byId("backup-log"), (State.data.backup || []).slice(0, 5).map(function(record) {
       return record.created_at + " · " + record.status + (record.file_name ? " · " + record.file_name : "");
     }), "Backup history will appear here.");
+  }
+
+  function renderStaffAccess_(records) {
+    const container = byId("staff-access-list");
+    container.replaceChildren();
+    if (!records.length) {
+      container.append(element("p", "muted", "No staff accounts are configured."));
+      return;
+    }
+    const table = createTable(["Username", "Staff name", "Password", "Role", "Page access", "Status", ""]);
+    const pageNames = {
+      dashboard: "Dashboard",
+      "new-order": "New order",
+      orders: "Orders",
+      products: "Products",
+      suppliers: "Suppliers",
+      stock: "Stock",
+      reports: "Reports"
+    };
+    records.forEach(function(record) {
+      const row = table.tBodies[0].insertRow();
+      row.insertCell().textContent = record.username;
+      row.insertCell().textContent = record.display_name;
+      row.insertCell().textContent = record.password;
+      row.insertCell().textContent = record.role === "admin" ? "Admin" : "Cashier";
+      row.insertCell().textContent = record.role === "admin"
+        ? "All pages"
+        : record.allowed_pages.map(function(page) { return pageNames[page] || page; }).join(", ");
+      row.insertCell().textContent = record.active ? "Enabled" : "Disabled";
+      const editCell = row.insertCell();
+      const editButton = element("button", "button-muted", "Edit");
+      editButton.type = "button";
+      editButton.addEventListener("click", function() { fillStaffAccessForm_(record); });
+      editCell.append(editButton);
+    });
+    container.append(table);
+  }
+
+  function fillStaffAccessForm_(record) {
+    const form = byId("staff-access-form");
+    form.elements.id.value = record.id;
+    form.elements.username.value = record.username;
+    form.elements.display_name.value = record.display_name;
+    form.elements.password.value = record.password;
+    form.elements.role.value = record.role;
+    form.elements.active.checked = record.active;
+    form.querySelectorAll('input[name="allowed_pages"]').forEach(function(input) {
+      input.checked = record.allowed_pages.indexOf(input.value) !== -1;
+    });
+    form.elements.role.dispatchEvent(new Event("change"));
+  }
+
+  function updateStaffPageControls_() {
+    const role = byId("staff-access-form").elements.role.value;
+    const pageOptions = byId("staff-access-form").querySelector(".staff-page-options");
+    pageOptions.hidden = role === "admin";
   }
 
   function populateSelects() {
@@ -923,7 +1106,7 @@
     clearCustomerMatch();
     renderItemCards();
     renderCart();
-    await refreshData(true);
+    refreshData(true);
     showNotice(result.queued ? "Order queued on this device. It is not yet shared with other devices." : "Order saved.");
     showReceipt(receipt);
   }
@@ -1089,7 +1272,11 @@
 
   async function updateQueueStatus() {
     try {
-      State.pendingActions = await DataService.getPendingActions();
+      const currentStaffId = State.data && State.data.currentUser
+        ? State.data.currentUser.id : "";
+      State.pendingActions = (await DataService.getPendingActions()).filter(function(action) {
+        return currentStaffId && action.created_by === currentStaffId;
+      });
       const count = State.pendingActions.length;
       text(byId("pending-count"), count ? count + " action(s) waiting on this device." : "No pending offline actions.");
       setConnectionState(!navigator.onLine);
@@ -1099,11 +1286,28 @@
     }
   }
 
-  async function runAction(action) {
+  async function runAction(action, form, pendingMessage) {
+    const message = pendingMessage || "Working…";
+    const submit = form ? form.querySelector('button[type="submit"]') : null;
+    const originalContent = submit ? submit.innerHTML : "";
+    if (submit) {
+      submit.disabled = true;
+      submit.setAttribute("aria-busy", "true");
+      submit.innerHTML = '<span class="button-spinner" aria-hidden="true"></span><span>' +
+        message + "</span>";
+    }
+    showNotice(message, false, true);
     try {
       await action();
+      if (byId("notice").textContent === message) showNotice("Complete.");
     } catch (error) {
       showNotice(error.message, true);
+    } finally {
+      if (submit) {
+        submit.disabled = false;
+        submit.removeAttribute("aria-busy");
+        submit.innerHTML = originalContent;
+      }
     }
   }
 
@@ -1166,14 +1370,14 @@
       try { addCartLine(); } catch (error) { showNotice(error.message, true); }
     });
     byId("order-form").addEventListener("submit", function(event) {
-      runAction(function() { return submitOrder(event); });
+      runAction(function() { return submitOrder(event); }, event.currentTarget, "Posting order…");
     });
     byId("orders-search").addEventListener("input", renderOrders);
     byId("orders-status").addEventListener("change", renderOrders);
     byId("product-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget;
         const values = new FormData(form);
         await DataService.createProduct({
           name: values.get("name"),
@@ -1184,14 +1388,14 @@
           inventory_item_id: values.get("inventory_item_id")
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Product saved.");
-      });
+      }, form, "Saving product…");
     });
     byId("addon-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget;
         const values = new FormData(form);
         await DataService.createAddOn({
           name: values.get("name"),
@@ -1200,41 +1404,44 @@
           inventory_item_id: values.get("inventory_item_id")
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Add-on saved.");
-      });
+      }, form, "Saving add-on…");
     });
     byId("supplier-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget, values = new FormData(form);
+        const values = new FormData(form);
         await DataService.createSupplier({
           name: values.get("name"), phone: values.get("phone"),
           email: values.get("email"), notes: values.get("notes")
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Supplier saved.");
-      });
+      }, form, "Saving supplier…");
     });
     byId("inventory-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget, values = new FormData(form);
+        const values = new FormData(form);
         await DataService.createInventoryItem({
           name: values.get("name"), category: values.get("category"),
           base_unit: values.get("base_unit"),
           low_stock_threshold: values.get("low_stock_threshold")
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Stock item saved.");
-      });
+      }, form, "Saving stock item…");
     });
     byId("receive-stock-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget, values = new FormData(form);
+        const values = new FormData(form);
         await DataService.receiveStock({
           supplier_id: values.get("supplier_id"),
           currency: values.get("currency"),
@@ -1246,14 +1453,15 @@
           }]
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Stock receipt saved.");
-      });
+      }, form, "Posting stock receipt…");
     });
     byId("quote-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget, values = new FormData(form);
+        const values = new FormData(form);
         const quoteDate = values.get("quoted_at");
         await DataService.recordSupplierPriceQuote({
           supplier_id: values.get("supplier_id"),
@@ -1265,15 +1473,15 @@
           notes: ""
         });
         form.reset();
-        await refreshData(true);
-        await loadPriceHistory();
+        refreshData(true).then(loadPriceHistory);
         showNotice("Supplier price quote saved.");
-      });
+      }, form, "Posting supplier quote…");
     });
     byId("stock-adjustment-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const form = event.currentTarget, values = new FormData(form);
+        const values = new FormData(form);
         await DataService.adjustStock({
           inventory_item_id: values.get("inventory_item_id"),
           movement_type: values.get("movement_type"),
@@ -1282,52 +1490,97 @@
           notes: values.get("notes")
         });
         form.reset();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Stock adjustment saved.");
-      });
+      }, form, "Saving adjustment…");
     });
     byId("price-history-item").addEventListener("change", loadPriceHistory);
     byId("stock-refresh").addEventListener("click", function() { refreshData(false); });
     byId("report-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const values = new FormData(event.currentTarget);
+        const values = new FormData(form);
         const report = await DataService.getReports({
           from: values.get("from") ? new Date(values.get("from") + "T00:00:00").toISOString() : "",
           to: values.get("to") ? new Date(values.get("to") + "T00:00:00").toISOString() : ""
         });
         renderReport(report);
-      });
+        showNotice("Report ready.");
+      }, form, "Loading report…");
     });
     byId("settings-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const values = new FormData(event.currentTarget);
+        const values = new FormData(form);
         await DataService.updateSettings({
           default_currency: values.get("default_currency"),
           tax_rate_basis_points: values.get("tax_rate_basis_points")
         });
-        await refreshData(true);
+        refreshData(true);
         showNotice("Settings saved.");
-      });
+      }, form, "Saving settings…");
     });
     byId("payment-cancel").addEventListener("click", function() { byId("payment-dialog").close(); });
     byId("receipt-close-button").addEventListener("click", function() { byId("receipt-dialog").close(); });
     byId("receipt-print-button").addEventListener("click", function() { window.print(); });
     byId("payment-form").addEventListener("submit", function(event) {
       event.preventDefault();
+      const form = event.currentTarget;
       runAction(async function() {
-        const values = new FormData(event.currentTarget);
+        const values = new FormData(form);
         await DataService.recordPayment(values.get("order_id"), {
           amount: values.get("amount"),
           method: values.get("method")
         });
         byId("payment-dialog").close();
-        await refreshData(true);
+        refreshData(true);
         showNotice("Payment recorded.");
-      });
+      }, form, "Posting payment…");
+    });
+    byId("staff-access-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const values = new FormData(form);
+      runAction(async function() {
+        const updated = await DataService.updateStaffAccess({
+          id: values.get("id"),
+          username: values.get("username"),
+          display_name: values.get("display_name"),
+          password: values.get("password"),
+          role: values.get("role"),
+          allowed_pages: values.getAll("allowed_pages"),
+          active: values.get("active") === "on"
+        });
+        if (updated.session_invalidated) {
+          await switchAccount_();
+          text(byId("sign-in-error"), "Your password changed. Sign in again.");
+          byId("sign-in-error").hidden = false;
+          return;
+        }
+        form.reset();
+        form.elements.id.value = "";
+        form.elements.active.checked = true;
+        form.elements.role.value = "cashier";
+        updateStaffPageControls_();
+        refreshData(true);
+        showNotice("Staff access saved.");
+      }, form, "Saving staff access…");
+    });
+    byId("staff-access-form").elements.role.addEventListener("change", updateStaffPageControls_);
+    byId("staff-access-clear").addEventListener("click", function() {
+      const form = byId("staff-access-form");
+      form.reset();
+      form.elements.id.value = "";
+      form.elements.active.checked = true;
+      updateStaffPageControls_();
     });
     window.addEventListener("online", function() {
+      if (!State.data) {
+        setSignedOutStatus_();
+        return;
+      }
       setConnectionState(false);
       DataService.flushPendingActions()
         .then(function() { refreshData(true); })
@@ -1339,9 +1592,6 @@
     window.addEventListener("bakery:queue-updated", updateQueueStatus);
     window.addEventListener("bakery:queue-error", function(event) {
       showNotice("A queued action needs attention: " + event.detail.message, true);
-    });
-    window.addEventListener("bakery:cache-error", function(event) {
-      showNotice("Browser offline cache is unavailable: " + event.detail.message, true);
     });
   }
 
@@ -1361,6 +1611,22 @@
       card.append(element("strong", "", pair[1]));
       container.append(card);
     });
+
+    const activityContainer = byId("report-activity");
+    activityContainer.replaceChildren();
+    if (!report.staff_activity || !report.staff_activity.length) {
+      activityContainer.append(element("p", "muted", "No staff activity is available for this period."));
+      return;
+    }
+    const table = createTable(["Time", "Staff", "Action", "Record"]);
+    report.staff_activity.forEach(function(entry) {
+      const row = table.tBodies[0].insertRow();
+      row.insertCell().textContent = new Date(entry.occurred_at).toLocaleString();
+      row.insertCell().textContent = entry.actor_name + " (" + entry.actor_username + ")";
+      row.insertCell().textContent = entry.action;
+      row.insertCell().textContent = entry.entity_id || "—";
+    });
+    activityContainer.append(table);
   }
 
   function bindCurrencyPrecision() {
@@ -1372,18 +1638,121 @@
     });
   }
 
+  async function signIn_() {
+    const button = byId("sign-in-button");
+    const error = byId("sign-in-error");
+    button.disabled = true;
+    error.hidden = true;
+    text(button, "Connecting…");
+    try {
+      await getAccessToken_();
+      button.hidden = true;
+      byId("staff-login-form").hidden = false;
+      byId("change-google-account").hidden = false;
+      byId("staff-login-form").elements.username.focus();
+      setSignedOutStatus_();
+    } catch (loginError) {
+      error.hidden = false;
+      text(error, loginError.message);
+    } finally {
+      button.disabled = false;
+      if (!button.hidden) text(button, "Connect shop Google account");
+    }
+  }
+
+  async function signInStaff_(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const error = byId("sign-in-error");
+    button.disabled = true;
+    error.hidden = true;
+    text(button, "Signing in…");
+    try {
+      const values = new FormData(form);
+      const session = await DataService.loginStaff(values.get("username"), values.get("password"));
+      staffSessionToken = session.sessionToken;
+      const connected = await refreshData(true);
+      if (!connected) {
+        staffSessionToken = "";
+        throw new Error(byId("notice").textContent || "Unable to load Bakery POS data.");
+      }
+      form.elements.password.value = "";
+      byId("sign-in-panel").hidden = true;
+      byId("app-shell").hidden = false;
+      byId("refresh-button").hidden = false;
+      byId("switch-account-button").hidden = false;
+      try {
+        await DataService.flushPendingActions();
+      } catch (queueError) {
+        showNotice("Could not sync pending actions: " + queueError.message, true);
+      }
+      if (!refreshTimer) {
+        refreshTimer = window.setInterval(function() {
+          if (navigator.onLine && !State.loading && State.data) refreshData(true);
+        }, 30000);
+      }
+    } catch (loginError) {
+      staffSessionToken = "";
+      error.hidden = false;
+      text(error, loginError.message);
+    } finally {
+      button.disabled = false;
+      text(button, "Sign in");
+    }
+  }
+
+  async function switchAccount_() {
+    const error = byId("sign-in-error");
+    error.hidden = true;
+    try {
+      if (staffSessionToken) await DataService.logoutStaff();
+    } catch (logoutError) {
+      error.hidden = false;
+      text(error, "Signed out on this device; server session cleanup failed: " + logoutError.message);
+    }
+    staffSessionToken = "";
+    State.data = null;
+    State.cart = [];
+    byId("app-shell").hidden = true;
+    byId("sign-in-panel").hidden = false;
+    byId("refresh-button").hidden = true;
+    byId("switch-account-button").hidden = true;
+    byId("user-label").hidden = true;
+    byId("staff-login-form").hidden = !accessToken;
+    byId("sign-in-button").hidden = Boolean(accessToken);
+    byId("change-google-account").hidden = !accessToken;
+    byId("staff-login-form").elements.password.value = "";
+    setSignedOutStatus_();
+  }
+
+  function changeGoogleAccount_() {
+    const oldToken = accessToken;
+    accessToken = "";
+    accessTokenExpiresAt = 0;
+    firstTokenRequest = true;
+    tokenClient = null;
+    staffSessionToken = "";
+    byId("staff-login-form").hidden = true;
+    byId("staff-login-form").reset();
+    byId("change-google-account").hidden = true;
+    byId("sign-in-button").hidden = false;
+    byId("sign-in-error").hidden = true;
+    setSignedOutStatus_();
+    if (oldToken && window.google && google.accounts && google.accounts.oauth2) {
+      google.accounts.oauth2.revoke(oldToken, function() {});
+    }
+  }
+
   async function startApp() {
     bindForms();
     bindCurrencyPrecision();
-    try {
-      await DataService.flushPendingActions();
-    } catch (error) {
-      showNotice("Offline queue unavailable: " + error.message, true);
-    }
-    await refreshData(true);
-    refreshTimer = window.setInterval(function() {
-      if (navigator.onLine && !State.loading) refreshData(true);
-    }, 30000);
+    byId("sign-in-button").addEventListener("click", signIn_);
+    byId("staff-login-form").addEventListener("submit", signInStaff_);
+    byId("change-google-account").addEventListener("click", changeGoogleAccount_);
+    byId("switch-account-button").addEventListener("click", switchAccount_);
+    if (navigator.onLine) setSignedOutStatus_();
+    else setConnectionState(true);
   }
 
   startApp();
