@@ -27,31 +27,19 @@ function getSections(sectionNames, options, sessionToken) {
   return buildSections_(staff, sectionNames, options || {});
 }
 
+// names: sections the caller needs now. options.optional: extra sections to include only if
+// they are already in the server cache (free to send, so the website skips a later call).
 function buildSections_(staff, sectionNames, options) {
+  const opts = options || {};
   const names = (Array.isArray(sectionNames) ? sectionNames : Object.keys(SECTION_PAGES_))
     .filter(function(name) { return canSeeSection_(staff, name); });
-  const tables = ["Settings"];
-  names.forEach(function(name) { tables.push.apply(tables, SECTION_TABLES_[name]); });
-  preloadTables_(tables);
-  const sections = {};
-  names.forEach(function(name) {
-    if (name === "catalog") {
-      sections.catalog = {
-        products: readTable_("Products").filter(isActive_),
-        addOns: readTable_("AddOns").filter(isActive_),
-        inventoryItems: readTable_("InventoryItems").filter(isActive_)
-      };
-    } else if (name === "orders") {
-      sections.orders = getStartupOrders_(options.ordersFrom, options.ordersTo);
-    } else if (name === "customers") {
-      sections.customers = { customers: getCustomerDirectory_() };
-    } else if (name === "stock") {
-      sections.stock = { stock: getStockSnapshot_() };
-    } else if (name === "suppliers") {
-      sections.suppliers = { suppliers: readTable_("Suppliers").filter(isActive_) };
-    } else if (name === "staff") {
-      sections.staff = { staffAccess: listStaffAccessRecords_() };
-    }
+  const optional = (Array.isArray(opts.optional) ? opts.optional : []).filter(function(name) {
+    return names.indexOf(name) === -1 && canSeeSection_(staff, name);
+  });
+  const sections = readSectionCache_(names.concat(optional), opts);
+  const missing = names.filter(function(name) { return !sections[name]; });
+  computeSections_(missing, opts).forEach(function(entry) {
+    sections[entry.name] = entry.data;
   });
   return {
     currentUser: staff,
@@ -60,6 +48,82 @@ function buildSections_(staff, sectionNames, options) {
     shopToday: shopDateString_(new Date()),
     generatedAt: nowIso_()
   };
+}
+
+// Builds sections from the sheet (one batch read) and stores them in the server cache.
+function computeSections_(names, options) {
+  if (!names.length) return [];
+  const tables = ["Settings"];
+  names.forEach(function(name) { tables.push.apply(tables, SECTION_TABLES_[name]); });
+  preloadTables_(tables);
+  const version = dataVersion_();
+  const toCache = {};
+  const result = names.map(function(name) {
+    const data = computeSection_(name, options);
+    const serialized = JSON.stringify(data);
+    if (serialized.length < 95000) toCache[sectionCacheKey_(name, options, version)] = serialized;
+    return { name: name, data: data };
+  });
+  try {
+    if (Object.keys(toCache).length) {
+      CacheService.getScriptCache().putAll(toCache, SECTION_CACHE_SECONDS_);
+    }
+  } catch (error) {
+    console.warn("Could not cache page data: " + error.message);
+  }
+  return result;
+}
+
+function computeSection_(name, options) {
+  if (name === "catalog") {
+    return {
+      products: readTable_("Products").filter(isActive_),
+      addOns: readTable_("AddOns").filter(isActive_),
+      inventoryItems: readTable_("InventoryItems").filter(isActive_)
+    };
+  }
+  if (name === "orders") return getStartupOrders_(options.ordersFrom, options.ordersTo);
+  if (name === "customers") return { customers: getCustomerDirectory_() };
+  if (name === "stock") return { stock: getStockSnapshot_() };
+  if (name === "suppliers") return { suppliers: readTable_("Suppliers").filter(isActive_) };
+  if (name === "staff") return { staffAccess: listStaffAccessRecords_() };
+  throw new Error("Unknown data section: " + name);
+}
+
+function sectionCacheKey_(name, options, version) {
+  let key = "sec_v" + SCHEMA_VERSION_ + "_" + version + "_" + name;
+  if (name === "orders") {
+    const range = normalizeOrderRange_(options.ordersFrom, options.ordersTo);
+    key += "_" + range.from + "_" + range.to;
+  }
+  return key;
+}
+
+function readSectionCache_(names, options) {
+  const found = {};
+  if (!names.length) return found;
+  const version = dataVersion_();
+  const keys = names.map(function(name) { return sectionCacheKey_(name, options, version); });
+  const cached = CacheService.getScriptCache().getAll(keys);
+  names.forEach(function(name, index) {
+    const value = cached[keys[index]];
+    if (!value) return;
+    try {
+      found[name] = JSON.parse(value);
+    } catch (error) {
+      // Ignore a damaged cache entry; it is rebuilt from the sheet.
+    }
+  });
+  return found;
+}
+
+// Fills the server cache for every section while the user is still typing their password, so
+// the sign-in call afterwards has everything ready.
+function warmSections_(options) {
+  const all = Object.keys(SECTION_PAGES_);
+  const cached = readSectionCache_(all, options);
+  computeSections_(all.filter(function(name) { return !cached[name]; }), options);
+  readTable_("StaffAccess");
 }
 
 function canSeeSection_(staff, sectionName) {
@@ -294,6 +358,7 @@ function createProduct(payload, requestId, sessionToken) {
       name: requiredText_(payload.name, "name", 120),
       category: optionalText_(payload.category, "category", 80),
       size: optionalText_(payload.size, "size", 80),
+      image: catalogImage_(payload.image),
       price_usd_minor: optionalMoney_(payload.price_usd, "USD"),
       price_khr_minor: optionalMoney_(payload.price_khr, "KHR"),
       inventory_item_id: optionalText_(payload.inventory_item_id, "inventory_item_id", 80),
@@ -327,7 +392,8 @@ function createAddOn(payload, requestId, sessionToken) {
       inventory_item_id: optionalText_(payload.inventory_item_id, "inventory_item_id", 80),
       active: true,
       created_at: now,
-      updated_at: now
+      updated_at: now,
+      image: catalogImage_(payload.image)
     };
     if (record.price_usd_minor === "" && record.price_khr_minor === "") {
       throw new Error("Enter a USD price, a KHR price, or both.");
@@ -356,8 +422,9 @@ function createOrder(payload, requestId, sessionToken) {
     preloadTables_(["Products", "AddOns", "Settings"]);
     const products = readTable_("Products");
     const addOns = readTable_("AddOns");
+    const settings = getSettings_();
     const items = payload.items.map(function(item, index) {
-      return prepareOrderItem_(item, index, currency, products, addOns, idempotencyKey);
+      return prepareOrderItem_(item, index, currency, products, addOns, idempotencyKey, settings);
     });
     const subtotal = items.reduce(function(sum, item) {
       return sum + item.line_total_minor;
@@ -370,7 +437,6 @@ function createOrder(payload, requestId, sessionToken) {
     if (discount > subtotal) {
       throw new Error("Discount cannot exceed the item subtotal.");
     }
-    const settings = getSettings_();
     const tax = payload.tax === undefined || payload.tax === ""
       ? Math.round((subtotal - discount) * settings.tax_rate_basis_points / 10000)
       : parseMoneyMinor_(payload.tax, currency);
@@ -378,9 +444,24 @@ function createOrder(payload, requestId, sessionToken) {
     if (!Number.isSafeInteger(total)) {
       throw new Error("Order total is out of range.");
     }
-    const paidAmount = parseMoneyMinor_(payload.paid_amount || "0", currency);
-    if (paidAmount > total) {
-      throw new Error("Paid amount cannot exceed the order total.");
+    // New websites send amount_received (+ received_currency): the cash handed over, which may be
+    // more than the total (change is given) and in either currency. Older websites and offline
+    // actions queued before this change send paid_amount, which keeps the old strict rule.
+    let settlement = null;
+    let paidAmount = 0;
+    if (payload.amount_received !== undefined && payload.amount_received !== null &&
+        payload.amount_received !== "") {
+      const receivedCurrency = choice_(payload.received_currency || currency, ["USD", "KHR"], "received currency");
+      const received = parseMoneyMinor_(payload.amount_received, receivedCurrency);
+      if (received > 0) {
+        settlement = settleReceived_(received, receivedCurrency, total, currency, settings);
+        paidAmount = settlement.applied_minor;
+      }
+    } else {
+      paidAmount = parseMoneyMinor_(payload.paid_amount || "0", currency);
+      if (paidAmount > total) {
+        throw new Error("Paid amount cannot exceed the order total.");
+      }
     }
 
     const channel = choice_(payload.order_channel || "walk_in", ["walk_in", "grab", "other"], "order channel");
@@ -421,7 +502,8 @@ function createOrder(payload, requestId, sessionToken) {
       created_at: now,
       updated_at: now,
       location: optionalText_(payload.location, "location", 300),
-      delivery_fee_minor: deliveryFee
+      delivery_fee_minor: deliveryFee,
+      exchange_rate_khr_per_usd: exchangeRate_(settings)
     };
 
     validateLinkedStock_(items);
@@ -434,23 +516,17 @@ function createOrder(payload, requestId, sessionToken) {
     const payments = [];
     if (paidAmount > 0) {
       const method = choice_(payload.payment_method || "cash", ["cash", "card_terminal", "other"], "payment method");
-      payments.push({
-        id: orderId + "_payment_initial",
-        order_id: orderId,
-        amount_minor: paidAmount,
-        currency: currency,
-        method: method,
-        status: "completed",
-        paid_at: now,
-        created_at: now
-      });
+      payments.push(paymentRecord_(orderId + "_payment_initial", orderId, paidAmount, currency,
+        method, now, settlement));
     }
     appendRows_("Orders", [order]);
     appendRows_("OrderItems", items);
     appendRows_("OrderStatusHistory", history);
     appendRows_("Payments", payments);
     reserveLinkedStock_(items, orderId, currency, now);
-    return finishOrder_(copyRecord_(order), items.map(copyRecord_), payments.map(copyRecord_), history);
+    const result = finishOrder_(copyRecord_(order), items.map(copyRecord_), payments.map(copyRecord_), history);
+    if (settlement) result.last_settlement = settlement;
+    return result;
   }, actor);
 }
 
@@ -492,32 +568,53 @@ function recordPayment(orderId, payload, requestId, sessionToken) {
     if (!order || order.status === "cancelled") {
       throw new Error("This order cannot receive a payment.");
     }
-    const currency = choice_(payload.currency || order.currency, ["USD", "KHR"], "currency");
-    if (currency !== order.currency) {
-      throw new Error("Payment currency must match the order currency.");
-    }
+    // payload.currency is the currency the customer paid in; it may differ from the order's.
+    // payload.amount may exceed the balance: the extra is returned as change.
+    const receivedCurrency = choice_(payload.currency || order.currency, ["USD", "KHR"], "currency");
     const current = getOrder_(orderId, order);
-    const amount = parseMoneyMinor_(payload.amount, currency);
-    if (amount <= 0 || amount > current.balance_due_minor) {
-      throw new Error("Payment must be greater than zero and cannot exceed the remaining balance.");
+    if (current.balance_due_minor <= 0) {
+      throw new Error("This order is already fully paid.");
+    }
+    const received = parseMoneyMinor_(payload.amount, receivedCurrency);
+    if (received <= 0) {
+      throw new Error("Payment must be greater than zero.");
+    }
+    const settlement = settleReceived_(received, receivedCurrency, current.balance_due_minor,
+      order.currency, getSettings_());
+    if (settlement.applied_minor <= 0) {
+      throw new Error("The amount received is too small to record in " + order.currency + ".");
     }
     const now = nowIso_();
-    const payment = {
-      id: idempotencyKey + "_payment",
-      order_id: orderId,
-      amount_minor: amount,
-      currency: currency,
-      method: choice_(payload.method || "cash", ["cash", "card_terminal", "other"], "payment method"),
-      status: "completed",
-      paid_at: now,
-      created_at: now
-    };
+    const payment = paymentRecord_(idempotencyKey + "_payment", orderId, settlement.applied_minor,
+      order.currency, choice_(payload.method || "cash", ["cash", "card_terminal", "other"], "payment method"),
+      now, settlement);
     appendRows_("Payments", [payment]);
-    return finishOrder_(current, current.items, current.payments.concat([payment]), current.status_history);
+    const result = finishOrder_(current, current.items, current.payments.concat([payment]), current.status_history);
+    result.last_settlement = settlement;
+    return result;
   }, actor);
 }
 
-function prepareOrderItem_(item, index, currency, products, addOns, orderId) {
+// A Payments row. amount/currency are what counts toward the order; settlement (optional) adds
+// what the customer handed over and the change given.
+function paymentRecord_(id, orderId, amountMinor, currency, method, now, settlement) {
+  return {
+    id: id,
+    order_id: orderId,
+    amount_minor: amountMinor,
+    currency: currency,
+    method: method,
+    status: "completed",
+    paid_at: now,
+    created_at: now,
+    received_amount_minor: settlement ? settlement.received_minor : amountMinor,
+    received_currency: settlement ? settlement.received_currency : currency,
+    exchange_rate_khr_per_usd: settlement ? settlement.exchange_rate_khr_per_usd : "",
+    change_minor: settlement ? settlement.change_minor : 0
+  };
+}
+
+function prepareOrderItem_(item, index, currency, products, addOns, orderId, settings) {
   if (!item || typeof item !== "object") {
     throw new Error("Each order item must be an object.");
   }
@@ -540,7 +637,10 @@ function prepareOrderItem_(item, index, currency, products, addOns, orderId) {
     if (!catalogItem) {
       throw new Error("The selected catalog item is unavailable.");
     }
-    const storedPrice = currency === "USD" ? catalogItem.price_usd_minor : catalogItem.price_khr_minor;
+    // KHR prices come from the USD price × the Settings exchange rate (see Currency.gs).
+    const storedPrice = currency === "USD"
+      ? catalogItem.price_usd_minor
+      : catalogKhrPriceMinor_(catalogItem, settings || getSettings_());
     if (storedPrice === "" || storedPrice === null || storedPrice === undefined) {
       throw new Error("The selected item has no " + currency + " price.");
     }
@@ -626,6 +726,16 @@ function releaseLinkedStock_(orderId, occurredAt) {
       notes: "Released after order cancellation"
     };
   }));
+}
+
+// Product / add-on photo: a plain file name kept in web/products/ (letters, numbers, . _ -) or a
+// full https:// link. Anything else is refused so the page never loads an unexpected address.
+function catalogImage_(value) {
+  const textValue = optionalText_(value, "image", 500);
+  if (!textValue) return "";
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(png|jpe?g|webp|gif)$/i.test(textValue)) return textValue;
+  if (/^https:\/\/[^\s"'<>]+$/i.test(textValue)) return textValue;
+  throw new Error("Image must be a file name like chocolate-cake.jpg (in web/products) or an https:// link.");
 }
 
 function isActive_(record) {

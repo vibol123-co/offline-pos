@@ -260,7 +260,10 @@ function getSettings_() {
     supported_currencies: JSON.parse(values.supported_currencies || '["USD","KHR"]'),
     default_currency: values.default_currency || "USD",
     tax_rate_basis_points: Number(values.tax_rate_basis_points || 0),
-    backup_retention_days: Number(values.backup_retention_days || 30)
+    backup_retention_days: Number(values.backup_retention_days || 30),
+    // KHR per 1 USD; 0 = not set. See Currency.gs.
+    khr_per_usd: Number(values.khr_per_usd || 0),
+    khr_rounding_riel: Number(values.khr_rounding_riel || DEFAULT_KHR_ROUNDING_RIEL_)
   };
 }
 
@@ -273,7 +276,7 @@ function updateSettings(payload, requestId, sessionToken) {
       throw new Error("Tax rate must be a whole number from 0 to 10000 basis points.");
     }
     const now = nowIso_();
-    upsertRows_("Settings", [
+    const rows = [
       { id: "default_currency", key: "default_currency", value: currency, updated_at: now },
       {
         id: "tax_rate_basis_points",
@@ -281,7 +284,24 @@ function updateSettings(payload, requestId, sessionToken) {
         value: String(taxRate),
         updated_at: now
       }
-    ]);
+    ];
+    // Optional so older website versions (which do not send them) keep the stored values.
+    if (payload.khr_per_usd !== undefined && payload.khr_per_usd !== null && payload.khr_per_usd !== "") {
+      const rate = Number(payload.khr_per_usd);
+      if (!Number.isInteger(rate) || rate < 0 || rate > 100000) {
+        throw new Error("Exchange rate must be a whole number of riel per 1 USD (0 to 100000; 0 = not set).");
+      }
+      rows.push({ id: "khr_per_usd", key: "khr_per_usd", value: String(rate), updated_at: now });
+    }
+    if (payload.khr_rounding_riel !== undefined && payload.khr_rounding_riel !== null &&
+        payload.khr_rounding_riel !== "") {
+      const step = Number(payload.khr_rounding_riel);
+      if (!Number.isInteger(step) || step < 1 || step > 10000) {
+        throw new Error("KHR rounding must be a whole number of riel from 1 to 10000.");
+      }
+      rows.push({ id: "khr_rounding_riel", key: "khr_rounding_riel", value: String(step), updated_at: now });
+    }
+    upsertRows_("Settings", rows);
     return getSettings_();
   }, actor);
 }

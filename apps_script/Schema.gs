@@ -10,17 +10,23 @@ const TABLE_SCHEMAS = {
   ],
   Products: [
     "id", "name", "category", "price_usd_minor", "price_khr_minor",
-    "inventory_item_id", "active", "created_at", "updated_at", "size"
+    "inventory_item_id", "active", "created_at", "updated_at", "size",
+    // Photo shown on the New Order card: a file name in web/products/ (e.g. "chocolate-cake.jpg")
+    // or a full https:// link. Empty = the default emoji icon. Can be typed straight into the Sheet.
+    "image"
   ],
   AddOns: [
     "id", "name", "price_usd_minor", "price_khr_minor", "inventory_item_id",
-    "active", "created_at", "updated_at"
+    "active", "created_at", "updated_at",
+    "image"
   ],
   Orders: [
     "id", "order_number", "customer_name", "customer_phone", "order_type",
     "order_channel", "fulfillment_method", "pickup_at", "status", "currency",
     "subtotal_minor", "discount_minor", "tax_minor", "total_minor", "notes",
-    "custom_details_json", "created_at", "updated_at", "location", "delivery_fee_minor"
+    "custom_details_json", "created_at", "updated_at", "location", "delivery_fee_minor",
+    // KHR per 1 USD at the time of the order (0 = no rate set), so old orders keep their rate.
+    "exchange_rate_khr_per_usd"
   ],
   OrderItems: [
     "id", "order_id", "item_type", "catalog_item_id", "name_snapshot",
@@ -28,7 +34,11 @@ const TABLE_SCHEMAS = {
   ],
   Payments: [
     "id", "order_id", "amount_minor", "currency", "method", "status",
-    "paid_at", "created_at"
+    "paid_at", "created_at",
+    // amount_minor/currency = what was applied to the order (order currency). The columns below
+    // record what the customer actually handed over, in which currency, the rate used, and the
+    // change given (change_minor is in received_currency).
+    "received_amount_minor", "received_currency", "exchange_rate_khr_per_usd", "change_minor"
   ],
   OrderStatusHistory: ["id", "order_id", "status", "changed_at"],
   Suppliers: ["id", "name", "phone", "email", "notes", "active", "created_at", "updated_at"],
@@ -71,7 +81,7 @@ const STATUS_TRANSITIONS = {
 
 // ---- Speed settings -------------------------------------------------------------------------
 // Bump SCHEMA_VERSION_ whenever TABLE_SCHEMAS changes so every project re-checks its tabs once.
-const SCHEMA_VERSION_ = "2";
+const SCHEMA_VERSION_ = "4";
 const SCHEMA_CACHE_KEY_ = "schema_ok_v" + SCHEMA_VERSION_;
 const SCHEMA_CACHE_SECONDS_ = 21600;
 // Small tables kept in the server cache between calls. Cleared on every write to them and by
@@ -82,6 +92,11 @@ const SHARED_CACHED_TABLES_ = [
 const SHARED_TABLE_CACHE_SECONDS_ = 600;
 const REQUEST_CACHE_SECONDS_ = 21600;
 const STOCK_LEVELS_PROPERTY_ = "STOCK_LEVELS_READY";
+// Ready-made page data (sections) kept in the server cache. Any saved change gets a new
+// "data version", so cached sections from before the change are never used again.
+const SECTION_CACHE_SECONDS_ = 600;
+const DATA_VERSION_KEY_ = "data_version";
+const DATA_VERSION_SECONDS_ = 21600;
 
 // Per-call memory. Apps Script resets globals for every call, so nothing leaks between calls.
 let spreadsheetMemo_ = null;
@@ -90,6 +105,8 @@ let tableMemo_ = {};
 let foundRowMemo_ = {};
 let schemaCheckedThisCall_ = false;
 let sheetsApiUnavailable_ = false;
+let dataVersionMemo_ = "";
+let dataChangedThisCall_ = false;
 
 function setupBakeryPos() {
   const properties = PropertiesService.getScriptProperties();
@@ -148,6 +165,7 @@ function ensureInitialAdmin_(email) {
     display_name: existing && existing.display_name ? existing.display_name : "Administrator",
     session_version: Number(existing && existing.session_version || 0) + (restoreAdmin ? 1 : 0)
   }]);
+  bumpDataVersion_();
 }
 
 // ---- Schema check (cached) ------------------------------------------------------------------
@@ -430,6 +448,25 @@ function forgetSharedTable_(tableName) {
 function clearSharedTableCache_() {
   CacheService.getScriptCache().removeAll(SHARED_CACHED_TABLES_.map(sharedTableKey_));
   tableMemo_ = {};
+  bumpDataVersion_();
+}
+
+function dataVersion_() {
+  if (dataVersionMemo_) return dataVersionMemo_;
+  const cache = CacheService.getScriptCache();
+  let version = cache.get(DATA_VERSION_KEY_);
+  if (!version) {
+    version = Utilities.getUuid().slice(0, 8);
+    cache.put(DATA_VERSION_KEY_, version, DATA_VERSION_SECONDS_);
+  }
+  dataVersionMemo_ = version;
+  return version;
+}
+
+function bumpDataVersion_() {
+  dataVersionMemo_ = Utilities.getUuid().slice(0, 8);
+  CacheService.getScriptCache().put(DATA_VERSION_KEY_, dataVersionMemo_, DATA_VERSION_SECONDS_);
+  dataChangedThisCall_ = false;
 }
 
 // Finds one record by id without reading a whole large table (uses Google's find tool).
@@ -577,6 +614,7 @@ function rowForId_(tableName, id) {
 
 function rememberWrittenRows_(tableName, records, rowNumbers, appended) {
   forgetSharedTable_(tableName);
+  if (tableName !== "RequestLog" && tableName !== "AuditLog") dataChangedThisCall_ = true;
   const entry = tableMemo_[tableName];
   records.forEach(function(record, index) {
     foundRowMemo_[tableName + "\u0000" + String(record.id)] = rowNumbers[index];
@@ -676,6 +714,7 @@ function rebuildStockLevelsUnlocked_() {
   foundRowMemo_ = {};
   forgetSharedTable_("StockLevels");
   PropertiesService.getScriptProperties().setProperty(STOCK_LEVELS_PROPERTY_, "true");
+  bumpDataVersion_();
 }
 
 // ---- Duplicate-safe writes -----------------------------------------------------------------
@@ -724,6 +763,8 @@ function runIdempotent_(requestId, action, work, actor) {
     }]);
     rememberRequest_(normalizedRequestId, action, resultJson);
     SpreadsheetApp.flush();
+    // New data version only after the change is saved, so no stale page data gets cached.
+    if (dataChangedThisCall_) bumpDataVersion_();
     return result;
   } finally {
     lock.releaseLock();
@@ -788,7 +829,9 @@ function ensureDefaultSettings_() {
     { key: "supported_currencies", value: JSON.stringify(["USD", "KHR"]) },
     { key: "default_currency", value: "USD" },
     { key: "tax_rate_basis_points", value: "0" },
-    { key: "backup_retention_days", value: "30" }
+    { key: "backup_retention_days", value: "30" },
+    { key: "khr_per_usd", value: "0" },
+    { key: "khr_rounding_riel", value: String(DEFAULT_KHR_ROUNDING_RIEL_) }
   ];
   const missing = defaults.filter(function(setting) {
     return existingKeys.indexOf(setting.key) === -1;
@@ -801,6 +844,7 @@ function ensureDefaultSettings_() {
     };
   });
   upsertRows_("Settings", missing);
+  if (missing.length) bumpDataVersion_();
 }
 
 function nowIso_() {

@@ -321,6 +321,8 @@
     return node;
   }
 
+  let noticeTimer_ = null;
+
   function showNotice(message, isError, isLoading) {
     const notice = byId("notice");
     notice.replaceChildren();
@@ -328,6 +330,13 @@
     notice.append(document.createTextNode(message));
     notice.classList.toggle("error", Boolean(isError));
     notice.classList.toggle("loading", Boolean(isLoading));
+    // Presentation: the toast hides itself (errors stay longer; "working" toasts stay until replaced).
+    if (noticeTimer_) window.clearTimeout(noticeTimer_);
+    if (!isLoading) {
+      noticeTimer_ = window.setTimeout(function() {
+        if (notice.textContent === message) notice.replaceChildren();
+      }, isError ? 9000 : 5000);
+    }
   }
 
   function moneyFromMinor(amountMinor, currency) {
@@ -351,6 +360,87 @@
     }).format(Number(value || 0));
   }
 
+  // ---- Exchange rate: mirrors Currency.gs on the server. Keep the two in step. ----
+  const Fx = {
+    rate(settings) {
+      const value = Number(((settings || (State.data && State.data.settings)) || {}).khr_per_usd || 0);
+      return Number.isInteger(value) && value > 0 ? value : 0;
+    },
+    step(settings) {
+      const value = Number(((settings || (State.data && State.data.settings)) || {}).khr_rounding_riel || 100);
+      return Number.isInteger(value) && value >= 1 ? value : 100;
+    },
+    roundKhr(riel, step) {
+      return Math.round(Number(riel) / step) * step;
+    },
+    // null when the currencies differ and no rate is set.
+    convert(amountMinor, from, to, rate) {
+      const amount = Number(amountMinor || 0);
+      if (from === to) return amount;
+      if (!rate) return null;
+      return from === "USD" ? Math.round(amount * rate / 100) : Math.round(amount * 100 / rate);
+    },
+    // Display equivalent: KHR figures are rounded to the cash step.
+    equivalent(amountMinor, from, to, rate, step) {
+      const converted = Fx.convert(amountMinor, from, to, rate);
+      if (converted === null) return null;
+      return to === "KHR" && from !== to ? Fx.roundKhr(converted, step) : converted;
+    },
+    // Price of a catalog item in the order currency ("" when it has none).
+    catalogPrice(record, currency) {
+      if (currency === "USD") return record.price_usd_minor;
+      const rate = Fx.rate();
+      const usd = record.price_usd_minor;
+      if (rate && usd !== "" && usd !== null && usd !== undefined) {
+        return Fx.roundKhr(Number(usd) * rate / 100, Fx.step());
+      }
+      return record.price_khr_minor;
+    },
+    // Same result as settleReceived_ in Currency.gs. Returns { error } instead of throwing.
+    settle(receivedMinor, receivedCurrency, dueMinor, orderCurrency, settings) {
+      const rate = Fx.rate(settings);
+      const step = Fx.step(settings);
+      if (receivedCurrency !== orderCurrency && !rate) {
+        return { error: "Set the KHR exchange rate in Settings before mixing USD and KHR." };
+      }
+      const received = Number(receivedMinor || 0);
+      const due = Math.max(Number(dueMinor || 0), 0);
+      const dueInReceived = Fx.equivalent(due, orderCurrency, receivedCurrency, rate, step);
+      let applied;
+      let change;
+      if (received >= dueInReceived) {
+        applied = due;
+        change = received - dueInReceived;
+      } else {
+        applied = Math.min(Fx.convert(received, receivedCurrency, orderCurrency, rate), due);
+        change = 0;
+      }
+      return {
+        received_minor: received,
+        received_currency: receivedCurrency,
+        due_in_received_currency_minor: dueInReceived,
+        applied_minor: applied,
+        change_minor: change,
+        change: Fx.changeBoth(change, receivedCurrency, rate, step),
+        exchange_rate_khr_per_usd: rate
+      };
+    },
+    changeBoth(changeMinor, currency, rate, step) {
+      const amount = Number(changeMinor || 0);
+      if (currency === "USD") {
+        return { usd_minor: amount, khr_minor: rate ? Fx.roundKhr(amount * rate / 100, step) : null };
+      }
+      return { usd_minor: rate ? Math.round(amount * 100 / rate) : null, khr_minor: Fx.roundKhr(amount, step) };
+    },
+    // "$7.63 / ៛31,300" style text; skips a currency that cannot be calculated.
+    bothText(usdMinor, khrMinor) {
+      const parts = [];
+      if (usdMinor !== null && usdMinor !== undefined) parts.push(moneyFromMinor(usdMinor, "USD"));
+      if (khrMinor !== null && khrMinor !== undefined) parts.push(moneyFromMinor(khrMinor, "KHR"));
+      return parts.join(" / ");
+    }
+  };
+
   function formatQuantity(milli) {
     return (Number(milli || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 3 });
   }
@@ -361,6 +451,7 @@
     status.classList.remove("pending");
     text(status, offline ? "Offline (current session only)" : "Connected to shop data");
     byId("offline-banner").hidden = !offline;
+    updateSyncPill_();
   }
 
   function setSignedOutStatus_() {
@@ -369,11 +460,13 @@
     status.classList.add("pending");
     text(status, "Sign in required");
     byId("offline-banner").hidden = true;
+    updateSyncPill_();
   }
 
   function emptyData_() {
     return {
-      currentUser: null, settings: { default_currency: "USD", tax_rate_basis_points: 0 },
+      currentUser: null,
+      settings: { default_currency: "USD", tax_rate_basis_points: 0, khr_per_usd: 0, khr_rounding_riel: 100 },
       products: [], addOns: [], inventoryItems: [], suppliers: [], stock: [],
       orders: [], openOrders: [], customers: [], staffAccess: [], ordersRange: null, shopToday: ""
     };
@@ -436,6 +529,10 @@
       if (!State.cart.length) {
         State.orderCurrency = State.data.settings.default_currency || "USD";
         byId("order-currency").value = State.orderCurrency;
+        if (!receivedEdited) {
+          byId("order-form").elements.received_currency.value = State.orderCurrency;
+          setReceivedStep_();
+        }
       }
       renderOrderTotals();
     }
@@ -457,7 +554,7 @@
       placeholder.setAttribute("role", "status");
       placeholder.append(element("span", "inline-spinner"));
       placeholder.append(document.createTextNode("Loading…"));
-      const heading = screen.querySelector(".screen-heading");
+      const heading = screen.querySelector(":scope > .screen-heading");
       if (heading) heading.after(placeholder); else screen.prepend(placeholder);
     });
   }
@@ -474,6 +571,7 @@
       const range = State.data && State.data.ordersRange;
       const reply = await DataService.getSections(wanted, {
         fresh: Boolean(opts.fresh),
+        optional: opts.optional || [],
         ordersFrom: range ? range.from : "",
         ordersTo: range ? range.to : ""
       });
@@ -504,6 +602,7 @@
       return refreshInFlight;
     }
     State.loading = true;
+    window.setTimeout(updateSyncPill_, 0); // presentation: pill shows "Refreshing…"
     refreshInFlight = (async function() {
       try {
         const active = sectionsForPage_(State.activeScreen);
@@ -528,6 +627,7 @@
     } finally {
       refreshInFlight = null;
       State.loading = false;
+      updateSyncPill_();
       if (refreshQueued) {
         refreshQueued = false;
         refreshData(true);
@@ -548,6 +648,7 @@
     const user = State.data && State.data.currentUser;
     if (user && user.allowed_pages.indexOf(name) === -1) return;
     State.activeScreen = name;
+    rememberSession_(staffSessionToken, name);
     document.querySelectorAll(".screen").forEach(function(screen) {
       screen.hidden = screen.id !== "screen-" + name;
     });
@@ -579,6 +680,15 @@
       ? (user.display_name || user.username) + " · " + (user.role === "admin" ? "Admin" : "Cashier")
       : "");
     userLabel.hidden = !user;
+    // Presentation: avatar initials, and hide shortcut buttons to pages this user can't open.
+    const avatar = byId("user-avatar");
+    const displayName = user ? String(user.display_name || user.username || "") : "";
+    avatar.textContent = displayName.split(/\s+/).filter(Boolean).slice(0, 2)
+      .map(function(part) { return part.charAt(0).toUpperCase(); }).join("") || "?";
+    avatar.hidden = !user;
+    document.querySelectorAll("[data-goto]").forEach(function(button) {
+      button.hidden = allowed.indexOf(button.dataset.goto) === -1;
+    });
     if (allowed.indexOf(State.activeScreen) === -1) {
       State.activeScreen = allowed[0] || "";
       document.querySelectorAll(".screen").forEach(function(screen) {
@@ -605,6 +715,10 @@
     });
     const lowStock = (State.data.stock || []).filter(function(item) { return item.is_low; });
     text(byId("kpi-low-stock"), String(lowStock.length));
+    byId("kpi-low-stock-card").classList.toggle("warn", lowStock.length > 0);
+    text(byId("dashboard-date"), "Today · " + new Date().toLocaleDateString(undefined, {
+      weekday: "long", day: "numeric", month: "long"
+    }));
     const attention = orders.concat(State.data.openOrders || []).filter(function(order) {
       return ["new", "preparing", "ready"].includes(order.status);
     }).sort(function(left, right) {
@@ -615,16 +729,43 @@
     if (!attention.length) {
       container.append(element("p", "muted", "No orders need attention."));
     }
+    const canChangeOrders = Boolean(State.data.currentUser &&
+      State.data.currentUser.allowed_pages.indexOf("orders") !== -1);
     attention.forEach(function(order) {
-      const row = element("button", "compact-row clickable",
-        order.order_number + " · " + (order.customer_name || "Walk-in") + " · " + order.status);
-      row.type = "button";
-      row.addEventListener("click", function() { openOrderDetail(order.id); });
+      // Presentation: row opens the order; the inline button is the same next step as on Orders.
+      const row = element("div", "compact-row" + (isOrderOverdue_(order) ? " overdue" : ""));
+      const open = element("button", "row-open");
+      open.type = "button";
+      open.append(element("b", "", order.order_number + " · " + (order.customer_name || "Walk-in")));
+      open.append(element("p", "", orderTypeLabel_(order.order_type) +
+        (order.pickup_at ? " · pickup " + new Date(order.pickup_at).toLocaleString(undefined, {
+          day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit"
+        }) : "") + (isOrderOverdue_(order) ? " · overdue" : "")));
+      open.addEventListener("click", function() { openOrderDetail(order.id); });
+      row.append(open);
+      row.append(element("span", "status status-" + order.status, order.status));
+      const next = { new: "preparing", preparing: "ready", ready: "completed" }[order.status];
+      if (next && canChangeOrders && !pendingOrderSaves[order.id]) {
+        const label = { preparing: "Start preparing", ready: "Mark ready", completed: "Complete" }[next];
+        const step = element("button", "btn btn-sm btn-secondary", label);
+        step.type = "button";
+        step.addEventListener("click", function() {
+          changeOrderStatus_(order, next, step, "Saving…", "Order status updated.");
+        });
+        row.append(step);
+      }
       container.append(row);
     });
-    renderSimpleRows(byId("dashboard-stock"), lowStock.slice(0, 8).map(function(item) {
-      return item.name + " · " + formatQuantity(item.on_hand_milli) + " " + item.base_unit;
-    }), "No low-stock items.");
+    const stockContainer = byId("dashboard-stock");
+    stockContainer.replaceChildren();
+    if (!lowStock.length) stockContainer.append(element("p", "muted", "No low-stock items."));
+    lowStock.slice(0, 8).forEach(function(item) {
+      const row = element("div", "stockrow");
+      row.append(element("b", "", item.name));
+      row.append(element("span", "chip danger", formatQuantity(item.on_hand_milli) + " " + item.base_unit));
+      stockContainer.append(row);
+    });
+    updateOrderAlerts_();
   }
 
   function renderSimpleRows(container, rows, emptyMessage) {
@@ -914,30 +1055,45 @@
     }
   }
 
+  // Presentation: row = colour bar · customer/meta/items · status · money · actions.
   function renderOrderCard(order) {
-    const card = element("article", "order-card");
-    const heading = element("div", "order-heading");
-    heading.append(element("h3", "", order.customer_name || "Walk-in customer"));
-    heading.append(element("span", "status status-" + order.status, order.status.replaceAll("_", " ")));
-    card.append(heading);
-    card.append(element("p", "order-meta",
+    const overdue = isOrderOverdue_(order);
+    const final = ["completed", "cancelled"].includes(order.status);
+    const card = element("article", "order-card" + (overdue ? " overdue" : "") + (final ? " final" : "") +
+      (order.status === "cancelled" ? " is-cancelled" : ""));
+    card.append(element("span", "bar"));
+    const main = element("div", "order-main");
+    main.append(element("h3", "", order.customer_name || "Walk-in customer"));
+    main.append(element("p", "order-meta",
       (order.order_number || "Pending sync") + " · " + order.order_channel + " · " + order.fulfillment_method +
       (order.created_at ? " · " + new Date(order.created_at).toLocaleString() : "") +
-      (order.pickup_at ? " · pickup " + new Date(order.pickup_at).toLocaleString() : "") +
       (order.location ? " · " + order.location : "")));
     const list = element("ul", "order-items");
     (order.items || []).forEach(function(item) {
       list.append(element("li", "", item.name_snapshot + (item.variant ? " · " + item.variant : "") + " × " + item.quantity));
     });
-    card.append(list);
-    card.append(element("p", "order-total",
-      moneyFromMinor(order.total_minor || 0, order.currency) +
-      " · paid " + moneyFromMinor(order.amount_paid_minor || 0, order.currency) +
-      " · due " + moneyFromMinor(order.balance_due_minor === undefined
-        ? order.total_minor || 0 : order.balance_due_minor, order.currency)));
+    main.append(list);
+    card.append(main);
+    const statusBox = element("div", "order-status");
+    statusBox.append(element("span", "status status-" + order.status, order.status.replaceAll("_", " ")));
+    if (order.pickup_at) {
+      const pickup = element("p", "order-meta", "Pickup " + new Date(order.pickup_at).toLocaleString());
+      if (overdue) pickup.append(element("span", "overdue-text", " · overdue"));
+      statusBox.append(pickup);
+    }
+    card.append(statusBox);
+    const due = order.balance_due_minor === undefined ? Number(order.total_minor || 0) : Number(order.balance_due_minor);
+    const money = element("div", "order-total");
+    money.append(element("span", "", moneyFromMinor(order.total_minor || 0, order.currency)));
+    if (order.status !== "cancelled") {
+      money.append(due > 0
+        ? element("span", "due", "due " + moneyFromMinor(due, order.currency))
+        : element("span", "paid", "paid"));
+    }
+    card.append(money);
     const actions = element("div", "order-actions");
     if (order.request_id) {
-      actions.append(element("span", "muted", "Waiting to sync"));
+      actions.append(element("span", "waiting", "Waiting to sync"));
     } else if (pendingOrderSaves[order.id]) {
       const saving = element("span", "muted saving-indicator");
       saving.append(element("span", "inline-spinner"), document.createTextNode(" " + pendingOrderSaves[order.id]));
@@ -946,7 +1102,7 @@
       const next = { new: "preparing", preparing: "ready", ready: "completed" }[order.status];
       if (next) {
         const label = { preparing: "Start preparing", ready: "Mark ready", completed: "Complete" }[next];
-        const statusButton = element("button", "", label);
+        const statusButton = element("button", "btn btn-sm btn-primary", label);
         statusButton.type = "button";
         statusButton.addEventListener("click", function() {
           changeOrderStatus_(order, next, statusButton, "Saving…", "Order status updated.");
@@ -954,7 +1110,7 @@
         actions.append(statusButton);
       }
       if (!["completed", "cancelled"].includes(order.status)) {
-        const paymentButton = element("button", "button-muted", "Record payment");
+        const paymentButton = element("button", "btn btn-sm btn-secondary", "Record payment");
         paymentButton.type = "button";
         paymentButton.addEventListener("click", function() { openPaymentDialog(order); });
         actions.append(paymentButton);
@@ -967,6 +1123,17 @@
         });
         actions.append(cancel);
       }
+    }
+    // Request 1: view / reprint the receipt of any order, including completed and cancelled ones.
+    if (!pendingOrderSaves[order.id]) {
+      const receiptButton = element("button", "receipt-reprint-button");
+      receiptButton.innerHTML = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>';
+      receiptButton.append(document.createTextNode("View / reprint receipt"));
+      receiptButton.type = "button";
+      receiptButton.addEventListener("click", function() {
+        showReceipt(order, { reprint: !order.request_id });
+      });
+      actions.append(receiptButton);
     }
     card.append(actions);
     return card;
@@ -1032,23 +1199,63 @@
     }
     const isProductTable = containerId === "products-table";
     const table = createTable(isProductTable
-      ? ["Name", "Size", "Category", "USD", "KHR", "Stock link"]
-      : ["Name", "USD", "KHR", "Stock link"]);
+      ? ["Photo", "Product", "Category", "USD", "KHR", "Stock link"]
+      : ["Photo", "Add-on", "USD", "KHR", "Stock link"]);
+    // Presentation: size shown under the name; numeric columns right-aligned.
+    const headCells = table.tHead.rows[0].cells;
+    const usdIndex = isProductTable ? 3 : 2;
+    if (isProductTable) headCells[2].className = "hide-sm";
+    headCells[usdIndex].className = "num";
+    headCells[usdIndex + 1].className = "num";
+    headCells[usdIndex + 2].className = "hide-sm";
+    const rate = Fx.rate();
     records.forEach(function(record) {
       const row = table.insertRow();
-      row.insertCell().textContent = record.name;
+      const noUsd = record.price_usd_minor === "" || record.price_usd_minor === undefined;
+      if (noUsd) row.className = "warn";
+      const photoCell = row.insertCell();
+      photoCell.className = "catalog-photo-cell";
+      photoCell.title = record.image || "No photo";
+      photoCell.append(catalogImageElement_(record, isProductTable ? "product" : "add_on"));
+      const nameCell = row.insertCell();
+      nameCell.className = "name-cell";
+      nameCell.append(element("b", "", record.name));
+      if (isProductTable && record.size) nameCell.append(element("small", "", record.size));
       if (isProductTable) {
-        row.insertCell().textContent = record.size || "—";
-        row.insertCell().textContent = record.category || "—";
+        const category = row.insertCell();
+        category.className = "hide-sm";
+        category.textContent = record.category || "—";
       }
-      row.insertCell().textContent = record.price_usd_minor === "" ? "—" : moneyFromMinor(record.price_usd_minor, "USD");
-      row.insertCell().textContent = record.price_khr_minor === "" ? "—" : moneyFromMinor(record.price_khr_minor, "KHR");
+      const usdCell = row.insertCell();
+      usdCell.className = "num";
+      if (noUsd) usdCell.append(element("span", "chip danger", "No USD price"));
+      else usdCell.append(element("b", "", moneyFromMinor(record.price_usd_minor, "USD")));
+      // KHR column shows the price the till will charge (USD × rate when a rate is set).
+      const khrPrice = Fx.catalogPrice(record, "KHR");
+      const khrCell = row.insertCell();
+      khrCell.className = "num";
+      khrCell.textContent = khrPrice === "" || khrPrice === undefined || khrPrice === null
+        ? "—" : moneyFromMinor(khrPrice, "KHR");
+      if (rate && !noUsd) khrCell.append(element("span", "auto", "from rate"));
       const linked = (State.data.inventoryItems || []).find(function(item) {
         return item.id === record.inventory_item_id;
       });
-      row.insertCell().textContent = linked ? linked.name : "—";
+      const linkCell = row.insertCell();
+      linkCell.className = "hide-sm" + (linked ? "" : " muted");
+      linkCell.textContent = linked ? linked.name : "Not linked";
     });
     container.append(table);
+    // Tab counts and the rate hint (presentation).
+    text(byId(isProductTable ? "catalog-products-count" : "catalog-addons-count"), String(records.length));
+    const hint = byId("catalog-rate-hint");
+    hint.replaceChildren();
+    if (rate) {
+      hint.append(document.createTextNode("KHR prices from rate "));
+      hint.append(element("b", "", "1 USD = " + moneyFromMinor(rate, "KHR")));
+      hint.append(document.createTextNode(", rounded to " + moneyFromMinor(Fx.step(), "KHR")));
+    } else {
+      hint.textContent = "No exchange rate set: KHR prices stored on each item are used.";
+    }
   }
 
   function renderSuppliers() {
@@ -1078,18 +1285,33 @@
       return;
     }
     const table = createTable(["Item", "Category", "On hand", "Low threshold", "Status", "History"]);
+    // Presentation: numeric columns right-aligned, category/threshold hidden on phones.
+    const headCells = table.tHead.rows[0].cells;
+    headCells[1].className = "hide-sm"; headCells[2].className = "num";
+    headCells[3].className = "num hide-sm"; headCells[5].className = "num";
+    const lowCount = items.filter(function(item) { return item.is_low; }).length;
+    text(byId("stock-low-summary"), lowCount + " of " + items.length + " item" + (items.length === 1 ? " is" : "s are") + " low");
     items.forEach(function(item) {
       const row = table.insertRow();
-      row.insertCell().textContent = item.name;
-      row.insertCell().textContent = item.category.replaceAll("_", " ");
-      row.insertCell().textContent = formatQuantity(item.on_hand_milli) + " " + item.base_unit;
-      row.insertCell().textContent = formatQuantity(item.low_stock_threshold_milli) + " " + item.base_unit;
-      row.insertCell().textContent = item.is_low ? "Low" : "OK";
+      if (item.is_low) row.className = "low";
+      row.insertCell().append(element("b", "", item.name));
+      const category = row.insertCell();
+      category.className = "hide-sm cat";
+      category.textContent = item.category.replaceAll("_", " ");
+      const onHand = row.insertCell();
+      onHand.className = "num onhand";
+      onHand.textContent = formatQuantity(item.on_hand_milli) + " " + item.base_unit;
+      const threshold = row.insertCell();
+      threshold.className = "num hide-sm";
+      threshold.textContent = formatQuantity(item.low_stock_threshold_milli) + " " + item.base_unit;
+      row.insertCell().append(element("span", item.is_low ? "chip danger" : "chip ready", item.is_low ? "Low" : "OK"));
       const historyCell = row.insertCell();
-      const button = element("button", "button-muted", "View");
+      historyCell.className = "num";
+      const button = element("button", "btn btn-sm btn-secondary", "View");
       button.type = "button";
       button.addEventListener("click", function() {
         byId("price-history-item").value = item.id;
+        activateTab_("stock-history");
         loadPriceHistory();
       });
       historyCell.append(button);
@@ -1101,6 +1323,8 @@
     const settings = State.data.settings || {};
     byId("settings-form").elements.default_currency.value = settings.default_currency || "USD";
     byId("settings-form").elements.tax_rate_basis_points.value = settings.tax_rate_basis_points || 0;
+    byId("settings-form").elements.khr_per_usd.value = settings.khr_per_usd || 0;
+    byId("settings-form").elements.khr_rounding_riel.value = settings.khr_rounding_riel || 100;
     const isAdmin = State.data.currentUser && State.data.currentUser.role === "admin";
     byId("settings-form").hidden = !isAdmin;
     byId("staff-access-section").hidden = !isAdmin;
@@ -1133,9 +1357,11 @@
       row.insertCell().textContent = record.role === "admin"
         ? "All pages"
         : record.allowed_pages.map(function(page) { return pageNames[page] || page; }).join(", ");
-      row.insertCell().textContent = record.active ? "Enabled" : "Disabled";
+      row.insertCell().append(element("span", record.active ? "chip ready" : "chip done",
+        record.active ? "Enabled" : "Disabled"));
       const editCell = row.insertCell();
-      const editButton = element("button", "button-muted", "Edit");
+      editCell.className = "num";
+      const editButton = element("button", "btn btn-sm btn-secondary", "Edit");
       editButton.type = "button";
       editButton.addEventListener("click", function() { fillStaffAccessForm_(record); });
       editCell.append(editButton);
@@ -1212,25 +1438,62 @@
     }
     const currency = byId("order-currency").value;
     records.forEach(function(record) {
-      const minor = currency === "USD" ? record.price_usd_minor : record.price_khr_minor;
+      const minor = Fx.catalogPrice(record, currency);
       const card = element("button", "item-card");
       card.type = "button";
       card.disabled = minor === "" || minor === undefined;
       card.setAttribute("aria-label", "Add " + record.name +
         (type === "product" && record.size ? " " + record.size : "") +
         (card.disabled ? ", no " + currency + " price" : ", " + moneyFromMinor(minor, currency)));
-      card.append(element("span", "item-card-icon", getCatalogIcon(record, type)));
-      card.append(element("span", "item-card-name", record.name));
+      card.dataset.catalogId = record.id;
+      card.dataset.itemType = type;
+      card.append(catalogImageElement_(record, type));
+      const cardText = element("span", "item-card-text");
+      cardText.append(element("span", "item-card-name", record.name));
       if (type === "product" && record.size) {
-        card.append(element("span", "item-card-size", record.size));
+        cardText.append(element("span", "item-card-size", record.size));
       }
-      card.append(element("span", "item-card-price",
+      cardText.append(element("span", "item-card-price",
         card.disabled ? "Price unavailable" : moneyFromMinor(minor, currency)));
+      card.append(cardText);
       card.addEventListener("click", function() {
         try { addCartLine(record); } catch (error) { showNotice(error.message, true); }
       });
       grid.append(card);
     });
+    markCardsInCart_();
+  }
+
+  // Presentation: outline catalog cards that already have a line in the cart.
+  function markCardsInCart_() {
+    document.querySelectorAll("#item-card-grid .item-card").forEach(function(card) {
+      card.classList.toggle("in-cart", State.cart.some(function(line) {
+        return line.catalog_item_id === card.dataset.catalogId && line.item_type === card.dataset.itemType;
+      }));
+    });
+  }
+
+  // Photo from web/products/ (or an https link) when the item has one; otherwise, or if the photo
+  // fails to load, the emoji icon. Same server rule as catalogImage_ in OrderService.gs.
+  function catalogImageSrc_(image) {
+    const value = String(image || "").trim();
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(png|jpe?g|webp|gif)$/i.test(value)) return "products/" + value;
+    if (/^https:\/\/[^\s"'<>]+$/i.test(value)) return value;
+    return "";
+  }
+
+  function catalogImageElement_(record, type) {
+    const icon = element("span", "item-card-icon", getCatalogIcon(record, type));
+    const src = catalogImageSrc_(record.image);
+    if (!src) return icon;
+    const image = document.createElement("img");
+    image.className = "item-card-image";
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.src = src;
+    image.addEventListener("error", function() { image.replaceWith(icon); });
+    return image;
   }
 
   function getCatalogIcon(record, type) {
@@ -1257,10 +1520,11 @@
     if (!State.cart.length) {
       const row = body.insertRow();
       const cell = row.insertCell();
-      cell.colSpan = 5;
+      cell.colSpan = 4;
       cell.className = "empty-cell";
-      cell.textContent = "Tap a product card above to start this order.";
+      cell.textContent = "Tap a product card to start this order.";
       text(byId("cart-subtotal"), moneyFromMinor(0, currency));
+      markCardsInCart_();
       renderOrderTotals();
       return;
     }
@@ -1271,10 +1535,12 @@
       const row = body.insertRow();
       const nameCell = row.insertCell();
       nameCell.append(element("span", "cart-item-name", item.name));
-      if (item.variant) nameCell.append(element("span", "cart-item-size", item.variant));
-      row.insertCell().textContent = String(item.quantity);
-      row.insertCell().textContent = moneyFromMinor(item.unit_price_minor, currency);
-      row.insertCell().textContent = moneyFromMinor(lineTotal, currency);
+      nameCell.append(element("span", "cart-item-size",
+        (item.variant ? item.variant + " · " : "") + moneyFromMinor(item.unit_price_minor, currency) + " each"));
+      row.insertCell().append(element("span", "cart-qty", "× " + item.quantity));
+      const amountCell = row.insertCell();
+      amountCell.className = "cart-amt";
+      amountCell.textContent = moneyFromMinor(lineTotal, currency);
       const removeCell = row.insertCell();
       const remove = element("button", "button-muted remove-item-button", "×");
       remove.type = "button";
@@ -1286,6 +1552,7 @@
       removeCell.append(remove);
     });
     text(byId("cart-subtotal"), moneyFromMinor(totalMinor, currency));
+    markCardsInCart_();
     renderOrderTotals();
   }
 
@@ -1311,7 +1578,7 @@
       };
     } else {
       if (!record) throw new Error("Select an available catalog item.");
-      const minor = currency === "USD" ? record.price_usd_minor : record.price_khr_minor;
+      const minor = Fx.catalogPrice(record, currency);
       if (minor === "" || minor === undefined) throw new Error("The item has no " + currency + " price.");
       line = {
         item_type: type,
@@ -1352,28 +1619,82 @@
     }
   }
 
+  // True once the cashier types in "Amount Received"; until then it follows the order total.
+  let receivedEdited = false;
+
+  function setReceivedStep_() {
+    const form = byId("order-form");
+    form.elements.amount_received.step = form.elements.received_currency.value === "USD" ? "0.01" : "1";
+  }
+
+  function minorToInputValue_(minor, currency) {
+    const exponent = CURRENCY_EXPONENTS[currency] || 0;
+    return (Number(minor || 0) / Math.pow(10, exponent)).toFixed(exponent);
+  }
+
   function renderOrderTotals() {
     if (!State.data) return;
+    const form = byId("order-form");
     const currency = byId("order-currency").value;
+    const receivedCurrency = form.elements.received_currency.value;
+    const rate = Fx.rate();
+    const step = Fx.step();
     const subtotal = State.cart.reduce(function(sum, item) {
       return sum + item.unit_price_minor * item.quantity;
     }, 0);
     const fee = readPreviewMoney(byId("delivery-fee").value, currency);
-    const discount = readPreviewMoney(byId("order-form").elements.discount.value, currency);
-    const paid = readPreviewMoney(byId("order-form").elements.paid_amount.value, currency);
-    const invalid = fee === null || discount === null || paid === null || discount > subtotal;
+    const discount = readPreviewMoney(form.elements.discount.value, currency);
+    const invalid = fee === null || discount === null || discount > subtotal;
     const taxBase = invalid ? 0 : subtotal - discount;
     const tax = Math.round(taxBase * Number(State.data.settings.tax_rate_basis_points || 0) / 10000);
     const total = invalid ? 0 : subtotal - discount + tax + fee;
-    const balance = total - (paid === null ? 0 : paid);
+
+    // Amount Received follows the total (in the chosen currency) until the cashier edits it.
+    const totalInReceived = Fx.equivalent(total, currency, receivedCurrency, rate, step);
+    if (!receivedEdited && totalInReceived !== null) {
+      form.elements.amount_received.value = minorToInputValue_(totalInReceived, receivedCurrency);
+    }
+    const received = readPreviewMoney(form.elements.amount_received.value, receivedCurrency);
+    const settlement = invalid || received === null
+      ? null
+      : Fx.settle(received, receivedCurrency, total, currency);
+
     text(byId("order-subtotal-preview"), moneyFromMinor(subtotal, currency));
     text(byId("order-delivery-preview"), fee === null ? "Check amount" : moneyFromMinor(fee, currency));
     text(byId("order-discount-preview"), discount === null ? "Check amount" : moneyFromMinor(discount, currency));
     text(byId("order-tax-preview"), moneyFromMinor(tax, currency));
-    text(byId("order-total-preview"), invalid ? "Check entered amounts" : moneyFromMinor(total, currency));
-    text(byId("order-balance-preview"), invalid || paid > total
-      ? "Check entered amounts"
-      : moneyFromMinor(balance, currency));
+
+    const totalKhr = Fx.equivalent(total, currency, "KHR", rate, step);
+    const totalUsd = Fx.equivalent(total, currency, "USD", rate, step);
+    text(byId("order-total-khr-preview"), invalid ? "Check entered amounts"
+      : totalKhr === null ? "Set exchange rate" : moneyFromMinor(totalKhr, "KHR"));
+    text(byId("order-total-usd-preview"), invalid ? "Check entered amounts"
+      : totalUsd === null ? "Set exchange rate" : moneyFromMinor(totalUsd, "USD"));
+    text(byId("order-received-preview"), received === null ? "Check amount" : moneyFromMinor(received, receivedCurrency));
+
+    // Presentation: grey "no change due" box when there is no change; red balance when money is owed.
+    const changeMinor = settlement && !settlement.error ? settlement.change_minor : 0;
+    byId("order-change-box").classList.toggle("zero", !changeMinor);
+    byId("order-balance-row").classList.toggle("due",
+      Boolean(!settlement || settlement.error || total - settlement.applied_minor > 0) && State.cart.length > 0);
+    if (Number(form.elements.discount.value || 0) > 0) byId("discount-field").hidden = false;
+    syncAllSegments_();
+    if (!settlement || settlement.error) {
+      const message = settlement && settlement.error ? settlement.error : "Check entered amounts";
+      text(byId("order-balance-preview"), message);
+      text(byId("order-change-usd-preview"), "—");
+      text(byId("order-change-khr-preview"), "—");
+    } else {
+      text(byId("order-balance-preview"), moneyFromMinor(total - settlement.applied_minor, currency));
+      text(byId("order-change-usd-preview"), settlement.change.usd_minor === null
+        ? "Set exchange rate" : moneyFromMinor(settlement.change.usd_minor, "USD"));
+      text(byId("order-change-khr-preview"), settlement.change.khr_minor === null
+        ? "Set exchange rate" : moneyFromMinor(settlement.change.khr_minor, "KHR"));
+    }
+    text(byId("order-rate-note"), rate
+      ? "Exchange rate: 1 USD = " + moneyFromMinor(rate, "KHR") + " · KHR rounded to " +
+        moneyFromMinor(step, "KHR") + "."
+      : "No exchange rate set (Settings): only " + currency + " can be received.");
   }
 
   function phoneMatchKey(value) {
@@ -1472,9 +1793,21 @@
       Math.max(0, subtotal - discount) *
       Number(State.data.settings.tax_rate_basis_points || 0) / 10000
     );
-    const paid = parseClientMoneyMinor(payload.paid_amount || "0", currency);
     const total = Math.max(0, subtotal - discount + tax + deliveryFee);
+    const received = parseClientMoneyMinor(payload.amount_received || "0", payload.received_currency);
+    const settlement = received > 0
+      ? Fx.settle(received, payload.received_currency, total, currency)
+      : null;
+    if (settlement && settlement.error) throw new Error(settlement.error);
+    const paid = settlement ? settlement.applied_minor : 0;
     return {
+      exchange_rate_khr_per_usd: Fx.rate(),
+      last_settlement: settlement,
+      payments: settlement ? [{
+        amount_minor: paid, currency: currency, method: payload.payment_method, status: "completed",
+        received_amount_minor: settlement.received_minor, received_currency: settlement.received_currency,
+        exchange_rate_khr_per_usd: settlement.exchange_rate_khr_per_usd, change_minor: settlement.change_minor
+      }] : [],
       order_number: "Pending sync",
       status: "pending_sync",
       created_at: new Date().toISOString(),
@@ -1529,7 +1862,8 @@
       location: formData.get("location"),
       delivery_fee: formData.get("delivery_fee") || "0",
       discount: formData.get("discount") || "0",
-      paid_amount: formData.get("paid_amount") || "0",
+      amount_received: formData.get("amount_received") || "0",
+      received_currency: formData.get("received_currency") || currency,
       payment_method: formData.get("payment_method"),
       notes: formData.get("notes"),
       custom_details: customDetails,
@@ -1559,7 +1893,9 @@
     State.orderCurrency = form.elements.currency.value;
     form.elements.delivery_fee.step = State.orderCurrency === "USD" ? "0.01" : "1";
     form.elements.discount.step = State.orderCurrency === "USD" ? "0.01" : "1";
-    form.elements.paid_amount.step = State.orderCurrency === "USD" ? "0.01" : "1";
+    form.elements.received_currency.value = State.orderCurrency;
+    receivedEdited = false;
+    setReceivedStep_();
     byId("custom-price").step = State.orderCurrency === "USD" ? "0.01" : "1";
     byId("cake-details").hidden = true;
     clearCustomerMatch();
@@ -1575,17 +1911,29 @@
       rememberCustomer_(preview);
       updateQueueStatus();
     }
-    showNotice(result.queued ? "Order queued on this device. It is not yet shared with other devices." : "Order saved.");
+    showNotice((result.queued ? "Order queued on this device. It is not yet shared with other devices." : "Order saved.") +
+      changeNoticeText_(receipt.last_settlement));
     showReceipt(receipt);
   }
 
-  function showReceipt(order) {
+  // " Give change: $7.63 / ៛31,300" (empty when no change is due).
+  function changeNoticeText_(settlement) {
+    if (!settlement || !settlement.change_minor) return "";
+    return " Give change: " + Fx.bothText(settlement.change.usd_minor, settlement.change.khr_minor) + ".";
+  }
+
+  // options.reprint: opened again later from the Orders page (request 1).
+  function showReceipt(order, options) {
+    const opts = options || {};
     const currency = order.currency;
     const items = order.items || [];
     text(byId("receipt-order-number"), order.order_number || "Pending sync");
     text(byId("receipt-order-status"), order.request_id || order.status === "pending_sync"
       ? "Saved on this device; waiting to sync to the shop."
-      : "Order saved");
+      : opts.reprint
+        ? "REPRINT · printed " + new Date().toLocaleString() + " · status: " + String(order.status || "").replaceAll("_", " ")
+        : "Order saved");
+    byId("receipt-dialog").classList.toggle("is-reprint", Boolean(opts.reprint));
 
     const details = byId("receipt-customer-details");
     details.replaceChildren();
@@ -1623,30 +1971,58 @@
 
     const totals = byId("receipt-totals");
     totals.replaceChildren();
-    [
-      ["Items subtotal", order.subtotal_minor],
-      ["Delivery fee", order.delivery_fee_minor || 0],
-      ["Discount", order.discount_minor || 0],
-      ["Tax", order.tax_minor || 0],
-      ["Total", order.total_minor]
-    ].forEach(function(pair, index) {
-      const row = element("div", index === 4 ? "receipt-grand-total" : "");
-      row.append(element("span", "", pair[0]));
-      const amount = moneyFromMinor(Number(pair[1] || 0), currency);
-      row.append(element("strong", "", index === 2 && Number(pair[1] || 0) ? "-" + amount : amount));
+    const addTotalRow = function(label, amountText, className) {
+      const row = element("div", className || "");
+      row.append(element("span", "", label));
+      row.append(element("strong", "", amountText));
       totals.append(row);
-    });
+    };
+    addTotalRow("Items subtotal", moneyFromMinor(Number(order.subtotal_minor || 0), currency));
+    // Presentation: zero Delivery fee / Discount rows are hidden on the receipt.
+    addTotalRow("Delivery fee", moneyFromMinor(Number(order.delivery_fee_minor || 0), currency),
+      Number(order.delivery_fee_minor || 0) ? "" : "is-zero");
+    const discount = Number(order.discount_minor || 0);
+    addTotalRow("Discount", (discount ? "-" : "") + moneyFromMinor(discount, currency), discount ? "" : "is-zero");
+    addTotalRow("Tax", moneyFromMinor(Number(order.tax_minor || 0), currency));
+    // KHR total above USD total, using the rate the order was made with (request 2c).
+    const orderRate = Number(order.exchange_rate_khr_per_usd || 0);
+    const step = Fx.step();
+    const total = Number(order.total_minor || 0);
+    const totalKhr = Fx.equivalent(total, currency, "KHR", orderRate, step);
+    const totalUsd = Fx.equivalent(total, currency, "USD", orderRate, step);
+    if (totalKhr !== null) addTotalRow("Total (KHR)", moneyFromMinor(totalKhr, "KHR"), "receipt-grand-total");
+    if (totalUsd !== null) addTotalRow("Total (USD)", moneyFromMinor(totalUsd, "USD"), "receipt-grand-total");
+    if (orderRate) addTotalRow("Exchange rate", "1 USD = " + moneyFromMinor(orderRate, "KHR"), "rate");
+
+    // Each payment: what was handed over and the change given (both currencies).
+    (order.payments || []).filter(function(record) { return record.status === "completed"; })
+      .forEach(function(record) {
+        const receivedCurrency = record.received_currency || record.currency;
+        const receivedMinor = record.received_amount_minor === undefined || record.received_amount_minor === ""
+          ? record.amount_minor : record.received_amount_minor;
+        addTotalRow("Received" + (record.paid_at ? " " + new Date(record.paid_at).toLocaleDateString() : "") +
+          " (" + String(record.method || "").replaceAll("_", " ") + ")",
+          moneyFromMinor(Number(receivedMinor || 0), receivedCurrency));
+        const changeMinor = Number(record.change_minor || 0);
+        if (changeMinor) {
+          const paymentRate = Number(record.exchange_rate_khr_per_usd || orderRate || 0);
+          const both = Fx.changeBoth(changeMinor, receivedCurrency, paymentRate, step);
+          addTotalRow("Change", Fx.bothText(both.usd_minor, both.khr_minor), "receipt-change");
+        }
+      });
+
     const paid = Number(order.amount_paid_minor || 0);
     const due = order.balance_due_minor === undefined
-      ? Math.max(Number(order.total_minor || 0) - paid, 0)
+      ? Math.max(total - paid, 0)
       : Number(order.balance_due_minor);
     text(byId("receipt-payment-state"),
       "Paid " + moneyFromMinor(paid, currency) + " · Balance due " + moneyFromMinor(due, currency));
-    byId("receipt-dialog").showModal();
+    const dialog = byId("receipt-dialog");
+    if (!dialog.open) dialog.showModal();
   }
 
   function createTable(headers) {
-    const table = element("table");
+    const table = element("table", "table");
     const head = table.createTHead().insertRow();
     headers.forEach(function(header) { head.append(element("th", "", header)); });
     table.createTBody();
@@ -1726,16 +2102,63 @@
     });
   }
 
+  let paymentDialogOrder = null;
+
+  // Record payment: the amount received can be in USD or KHR and may be more than the balance
+  // (the change is shown). It starts filled with the balance due.
   function openPaymentDialog(order) {
     const dialog = byId("payment-dialog");
     const form = byId("payment-form");
+    paymentDialogOrder = order;
     form.elements.order_id.value = order.id;
-    form.elements.amount.step = order.currency === "USD" ? "0.01" : "1";
-    form.elements.amount.max = Number(order.balance_due_minor) / Math.pow(10, CURRENCY_EXPONENTS[order.currency]);
-    form.elements.amount.value = "";
-    text(byId("payment-order-context"),
-      order.order_number + " · remaining balance " + moneyFromMinor(order.balance_due_minor, order.currency));
+    form.elements.currency.value = order.currency;
+    form.elements.currency.disabled = !Fx.rate();
+    fillPaymentAmount_();
     dialog.showModal();
+  }
+
+  function fillPaymentAmount_() {
+    const order = paymentDialogOrder;
+    if (!order) return;
+    const form = byId("payment-form");
+    const payCurrency = form.elements.currency.value;
+    form.elements.amount.step = payCurrency === "USD" ? "0.01" : "1";
+    form.elements.amount.removeAttribute("max");
+    const due = Fx.equivalent(order.balance_due_minor, order.currency, payCurrency, Fx.rate(), Fx.step());
+    form.elements.amount.value = due === null ? "" : minorToInputValue_(due, payCurrency);
+    const dueKhr = Fx.equivalent(order.balance_due_minor, order.currency, "KHR", Fx.rate(), Fx.step());
+    const dueUsd = Fx.equivalent(order.balance_due_minor, order.currency, "USD", Fx.rate(), Fx.step());
+    text(byId("payment-order-context"),
+      order.order_number + " · remaining balance " + Fx.bothText(dueUsd, dueKhr));
+    renderPaymentChange_();
+  }
+
+  function renderPaymentChange_() {
+    const order = paymentDialogOrder;
+    if (!order) return;
+    const form = byId("payment-form");
+    const payCurrency = form.elements.currency.value;
+    const preview = byId("payment-change-preview");
+    preview.replaceChildren();
+    preview.classList.remove("error", "zero");
+    syncAllSegments_();
+    const received = readPreviewMoney(form.elements.amount.value, payCurrency);
+    if (received === null) { preview.classList.add("error"); text(preview, "Check amount"); return; }
+    const settlement = Fx.settle(received, payCurrency, order.balance_due_minor, order.currency);
+    if (settlement.error) { preview.classList.add("error"); text(preview, settlement.error); return; }
+    const remaining = Number(order.balance_due_minor) - settlement.applied_minor;
+    // Presentation: same values as before, split into a "Change" line and a "Still due" line.
+    preview.classList.toggle("zero", !settlement.change_minor);
+    const top = element("div", "top");
+    top.append(element("span", "lbl", "Change"));
+    top.append(element("strong", "", settlement.change_minor
+      ? Fx.bothText(settlement.change.usd_minor, settlement.change.khr_minor)
+      : "No change due"));
+    preview.append(top);
+    const still = element("div", "still");
+    still.append(element("span", "", "Still due after this payment"));
+    still.append(element("b", remaining > 0 ? "due" : "", moneyFromMinor(remaining, order.currency)));
+    preview.append(still);
   }
 
   async function updateQueueStatus() {
@@ -1783,13 +2206,26 @@
     document.querySelectorAll(".nav-button").forEach(function(button) {
       button.addEventListener("click", function() { showScreen(button.dataset.screen); });
     });
-    byId("refresh-button").addEventListener("click", function() {
-      const button = byId("refresh-button");
-      withBusyButton_(button, "", async function() {
+    // Sync pill = manual refresh (same calls as the old refresh button).
+    const manualRefresh_ = async function() {
+      if (syncPillBusy_) return;
+      syncPillBusy_ = true;
+      updateSyncPill_();
+      try {
         await DataService.flushPendingActions();
         await refreshData(false, { fresh: true });
-      }).catch(function(error) { showNotice(error.message, true); });
+      } catch (error) {
+        showNotice(error.message, true);
+      } finally {
+        syncPillBusy_ = false;
+        updateSyncPill_();
+      }
+    };
+    byId("refresh-button").addEventListener("click", manualRefresh_);
+    byId("sync-action").addEventListener("click", function() {
+      if (byId("sync-action").dataset.action === "reconnect") reconnectGoogle_(); else manualRefresh_();
     });
+    byId("banner-reconnect").addEventListener("click", reconnectGoogle_);
     byId("line-type").addEventListener("change", renderItemCards);
     byId("order-form").elements.customer_phone.addEventListener("input", scheduleCustomerLookup);
     byId("use-customer-match").addEventListener("click", function() {
@@ -1798,15 +2234,27 @@
       byId("order-form").elements.location.value = matchedCustomer.location || "";
       showNotice("Saved customer details filled in.");
     });
-    ["delivery_fee", "discount", "paid_amount"].forEach(function(name) {
+    ["delivery_fee", "discount"].forEach(function(name) {
       byId("order-form").elements[name].addEventListener("input", renderOrderTotals);
     });
+    // Amount Received follows the total until the cashier types in it.
+    byId("order-form").elements.amount_received.addEventListener("input", function() {
+      receivedEdited = true;
+      renderOrderTotals();
+    });
+    byId("order-form").elements.received_currency.addEventListener("change", function() {
+      receivedEdited = false;
+      setReceivedStep_();
+      renderOrderTotals();
+    });
+    byId("payment-form").elements.currency.addEventListener("change", fillPaymentAmount_);
+    byId("payment-form").elements.amount.addEventListener("input", renderPaymentChange_);
     byId("order-currency").addEventListener("change", function() {
       const selectedCurrency = byId("order-currency").value;
       const form = byId("order-form");
-      const hasAmounts = ["delivery_fee", "discount", "paid_amount"].some(function(name) {
+      const hasAmounts = ["delivery_fee", "discount"].some(function(name) {
         return Number(form.elements[name].value || 0) > 0;
-      });
+      }) || (receivedEdited && Number(form.elements.amount_received.value || 0) > 0);
       if ((State.cart.length || hasAmounts) &&
           !window.confirm("Changing currency clears the current items and entered amounts. Continue?")) {
         byId("order-currency").value = State.orderCurrency;
@@ -1815,12 +2263,13 @@
       State.cart = [];
       form.elements.delivery_fee.value = "0";
       form.elements.discount.value = "0";
-      form.elements.paid_amount.value = "0";
+      form.elements.received_currency.value = selectedCurrency;
+      receivedEdited = false;
       State.orderCurrency = selectedCurrency;
       byId("custom-price").step = selectedCurrency === "USD" ? "0.01" : "1";
       byId("order-form").elements.delivery_fee.step = selectedCurrency === "USD" ? "0.01" : "1";
       byId("order-form").elements.discount.step = selectedCurrency === "USD" ? "0.01" : "1";
-      byId("order-form").elements.paid_amount.step = selectedCurrency === "USD" ? "0.01" : "1";
+      setReceivedStep_();
       renderItemCards();
       renderCart();
     });
@@ -1884,7 +2333,8 @@
           size: values.get("size"),
           price_usd: values.get("price_usd"),
           price_khr: values.get("price_khr"),
-          inventory_item_id: values.get("inventory_item_id")
+          inventory_item_id: values.get("inventory_item_id"),
+          image: values.get("image")
         });
         form.reset();
         if (saved && !saved.queued) { State.data.products.push(saved); SECTION_RENDERERS.catalog(); }
@@ -1900,7 +2350,8 @@
           name: values.get("name"),
           price_usd: values.get("price_usd"),
           price_khr: values.get("price_khr"),
-          inventory_item_id: values.get("inventory_item_id")
+          inventory_item_id: values.get("inventory_item_id"),
+          image: values.get("image")
         });
         form.reset();
         if (saved && !saved.queued) { State.data.addOns.push(saved); SECTION_RENDERERS.catalog(); }
@@ -1995,12 +2446,7 @@
       }, form, "Saving adjustment…");
     });
     byId("price-history-item").addEventListener("change", loadPriceHistory);
-    byId("stock-refresh").addEventListener("click", function() {
-      withBusyButton_(byId("stock-refresh"), "", function() {
-        return loadSections_(["stock"], { force: true });
-      }).then(function() { showNotice("Stock refreshed."); })
-        .catch(function(error) { showNotice(error.message, true); });
-    });
+    // #stock-refresh was removed in the redesign: the top-bar sync pill refreshes all data.
     byId("report-form").addEventListener("submit", function(event) {
       event.preventDefault();
       const form = event.currentTarget;
@@ -2021,11 +2467,16 @@
         const values = new FormData(form);
         const settings = await DataService.updateSettings({
           default_currency: values.get("default_currency"),
-          tax_rate_basis_points: values.get("tax_rate_basis_points")
+          tax_rate_basis_points: values.get("tax_rate_basis_points"),
+          khr_per_usd: values.get("khr_per_usd"),
+          khr_rounding_riel: values.get("khr_rounding_riel")
         });
         if (settings && !settings.queued) {
           State.data.settings = settings;
           renderSections_([], true);
+          // KHR prices and totals depend on the rate.
+          renderItemCards();
+          renderOrderTotals();
         }
         showNotice("Settings saved.");
       }, form, "Saving settings…");
@@ -2040,11 +2491,12 @@
         const values = new FormData(form);
         const saved = await DataService.recordPayment(values.get("order_id"), {
           amount: values.get("amount"),
+          currency: form.elements.currency.value,
           method: values.get("method")
         });
         byId("payment-dialog").close();
         if (saved && !saved.queued) upsertLocalOrder_(saved);
-        showNotice("Payment recorded.");
+        showNotice("Payment recorded." + changeNoticeText_(saved && saved.last_settlement));
       }, form, "Posting payment…");
     });
     byId("staff-access-form").addEventListener("submit", function(event) {
@@ -2147,7 +2599,50 @@
   }
 
   function landingSections_() {
-    return { sections: sectionsForPage_(State.activeScreen || "dashboard") };
+    return {
+      sections: sectionsForPage_(State.activeScreen || "dashboard"),
+      optional: ALL_SECTIONS
+    };
+  }
+
+  // ---- Staff session kept for this browser tab only (survives a page refresh, cleared when
+  // the tab closes or on Switch user). The Google token is never stored.
+  const SESSION_STORAGE_KEY = "bakeryPos.staffSession";
+
+  function rememberSession_(token, screen) {
+    try {
+      if (!token || token === STAFF_LOGIN_DISABLED_TOKEN) {
+        if (!token) window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+      window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+        token: token,
+        screen: screen || State.activeScreen || "dashboard"
+      }));
+    } catch (error) {
+      // Storage can be blocked (private mode): the app simply asks for the password again.
+    }
+  }
+
+  function readRememberedSession_() {
+    try {
+      const value = JSON.parse(window.sessionStorage.getItem(SESSION_STORAGE_KEY) || "null");
+      return value && typeof value.token === "string" && value.token ? value : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function forgetSession_() {
+    try { window.sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (error) { /* ignore */ }
+  }
+
+  function showStaffLoginForm_() {
+    byId("sign-in-button").hidden = true;
+    byId("change-google-account").hidden = false;
+    byId("staff-login-form").hidden = false;
+    byId("staff-login-form").elements.username.focus();
+    setSignedOutStatus_();
   }
 
   async function signIn_() {
@@ -2157,29 +2652,41 @@
     error.hidden = true;
     try {
       await getAccessToken_();
-      let authConfig = null;
-      try {
-        authConfig = await DataService.getAuthConfig(landingSections_());
-      } catch (configError) {
-        // Older API deployments have no getAuthConfig: fall back to the staff sign-in form.
-        authConfig = null;
+      // After a page refresh in the same tab: go straight back in, no password.
+      const remembered = readRememberedSession_();
+      if (remembered) {
+        staffSessionToken = remembered.token;
+        if (PAGE_SECTIONS[remembered.screen]) State.activeScreen = remembered.screen;
+        try {
+          clearButtonBusy_(button);
+          setButtonBusy_(button, "Opening…");
+          await enterApp_(null);
+          return;
+        } catch (resumeError) {
+          staffSessionToken = "";
+          forgetSession_();
+        }
       }
       clearButtonBusy_(button);
-      button.hidden = true;
-      byId("change-google-account").hidden = false;
-      staffLoginDisabled = Boolean(authConfig && authConfig.staffLoginEnabled === false);
-      if (staffLoginDisabled) {
-        staffSessionToken = STAFF_LOGIN_DISABLED_TOKEN;
-        await enterApp_(authConfig.startup);
-        return;
-      }
-      byId("staff-login-form").hidden = false;
-      byId("staff-login-form").elements.username.focus();
-      setSignedOutStatus_();
+      // Show the username form at once; the server check runs while the user types and also
+      // prepares the page data, so signing in is quick.
+      showStaffLoginForm_();
+      DataService.getAuthConfig(Object.assign({ warm: true }, landingSections_()))
+        .then(function(authConfig) {
+          staffLoginDisabled = Boolean(authConfig && authConfig.staffLoginEnabled === false);
+          if (staffLoginDisabled && !staffSessionToken) {
+            staffSessionToken = STAFF_LOGIN_DISABLED_TOKEN;
+            byId("staff-login-form").hidden = true;
+            return enterApp_(authConfig.startup);
+          }
+          return null;
+        })
+        .catch(function() {
+          // Older API deployments have no getAuthConfig: the staff sign-in form is already shown.
+        });
     } catch (loginError) {
       staffSessionToken = "";
-      clearButtonBusy_(button);
-      if (staffLoginDisabled) button.hidden = false;
+      button.hidden = false;
       error.hidden = false;
       text(error, loginError.message);
     } finally {
@@ -2200,10 +2707,12 @@
         values.get("username"), values.get("password"), landingSections_()
       );
       staffSessionToken = session.sessionToken;
+      rememberSession_(staffSessionToken, State.activeScreen);
       form.elements.password.value = "";
       await enterApp_(session.startup);
     } catch (loginError) {
       staffSessionToken = "";
+      forgetSession_();
       error.hidden = false;
       text(error, loginError.message);
     } finally {
@@ -2223,7 +2732,7 @@
       applySections_(startup, landing);
     } else {
       try {
-        await loadSections_(landing.length ? landing : ["catalog"]);
+        await loadSections_(landing.length ? landing : ["catalog"], { optional: ALL_SECTIONS });
       } catch (loadError) {
         staffSessionToken = "";
         State.data = null;
@@ -2257,6 +2766,7 @@
       text(error, "Signed out on this device; server session cleanup failed: " + logoutError.message);
     }
     staffSessionToken = "";
+    forgetSession_();
     State.data = null;
     State.ready = {};
     State.cart = [];
@@ -2279,6 +2789,7 @@
     firstTokenRequest = true;
     tokenClient = null;
     staffSessionToken = "";
+    forgetSession_();
     byId("staff-login-form").hidden = true;
     byId("staff-login-form").reset();
     byId("change-google-account").hidden = true;
@@ -2290,9 +2801,295 @@
     }
   }
 
+  // =================================================================================================
+  // Presentation helpers (redesign). These only show/hide, restyle, or forward clicks to existing
+  // controls and functions. They never change calculations, server calls or the offline queue.
+  // =================================================================================================
+  let syncPillBusy_ = false;
+  const STALE_AFTER_MS_ = 10 * 60 * 1000;
+
+  function minutesAgoText_(time) {
+    if (!time) return "";
+    const minutes = Math.floor((Date.now() - time) / 60000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return minutes + " min ago";
+    const hours = Math.floor(minutes / 60);
+    return hours + " h ago";
+  }
+
+  // Sync pill states: ok | stale | busy | offline | sign-in expired. Uses existing state only.
+  function updateSyncPill_() {
+    const pill = byId("refresh-button");
+    const action = byId("sync-action");
+    const expiredBanner = byId("banner-expired");
+    if (!pill) return;
+    const signedIn = Boolean(State.data && State.data.currentUser);
+    pill.hidden = !signedIn;
+    action.hidden = true;
+    expiredBanner.hidden = true;
+    if (!signedIn) {
+      byId("banner-overdue").hidden = true;
+      byId("nav-orders-count").hidden = true;
+      return;
+    }
+    const label = pill.querySelector(".sync-label");
+    const time = pill.querySelector(".sync-time");
+    const setPill = function(kind, labelText, timeText, disabled) {
+      pill.className = "sync " + kind;
+      label.textContent = labelText;
+      time.textContent = timeText ? " · " + timeText : "";
+      pill.disabled = Boolean(disabled);
+    };
+    const queued = (State.pendingActions || []).length;
+    const expired = !accessToken || Date.now() >= accessTokenExpiresAt;
+    if (syncPillBusy_ || refreshInFlight) {
+      setPill("busy", "Refreshing…", "", true);
+    } else if (!navigator.onLine) {
+      setPill("off", "Offline", queued + " queued", true);
+    } else if (expired) {
+      setPill("err", "Sign-in expired", "", true);
+      action.hidden = false;
+      action.className = "sync-btn danger";
+      action.dataset.action = "reconnect";
+      action.querySelector("span").textContent = "Reconnect";
+      expiredBanner.hidden = false;
+    } else if (lastRefreshAt && Date.now() - lastRefreshAt > STALE_AFTER_MS_) {
+      setPill("stale", "Last synced", minutesAgoText_(lastRefreshAt), false);
+      action.hidden = false;
+      action.className = "sync-btn warning";
+      action.dataset.action = "refresh";
+      action.querySelector("span").textContent = "Refresh";
+    } else {
+      setPill("ok", "Synced", minutesAgoText_(lastRefreshAt), false);
+    }
+  }
+
+  // Existing sign-in flow: ask Google for a new token, then refresh the data.
+  async function reconnectGoogle_() {
+    try {
+      accessTokenExpiresAt = 0;
+      accessToken = "";
+      await getAccessToken_();
+      updateSyncPill_();
+      await refreshData(false, { fresh: true });
+    } catch (error) {
+      showNotice(error.message, true);
+    } finally {
+      updateSyncPill_();
+    }
+  }
+
+  function isOrderOverdue_(order) {
+    if (!order || !order.pickup_at || order.request_id) return false;
+    if (["new", "preparing", "ready"].indexOf(order.status) === -1) return false;
+    return new Date(order.pickup_at).getTime() < Date.now();
+  }
+
+  function orderTypeLabel_(type) {
+    return { walk_in: "Walk-in", advance: "Advance order", custom_cake: "Custom cake" }[type] || "Order";
+  }
+
+  // Orders nav badge (open orders) and the critical "overdue" banner.
+  function updateOrderAlerts_() {
+    if (!State.data) return;
+    const open = allKnownOrders_().filter(function(order) {
+      return ["new", "preparing", "ready"].indexOf(order.status) !== -1;
+    });
+    const badge = byId("nav-orders-count");
+    badge.textContent = String(open.length);
+    badge.hidden = !open.length;
+    const overdue = open.filter(isOrderOverdue_);
+    const banner = byId("banner-overdue");
+    banner.hidden = !overdue.length;
+    if (overdue.length) {
+      const first = overdue.slice(0, 3).map(function(order) {
+        return order.order_number + " (" + (order.customer_name || "Walk-in") + ")";
+      }).join(", ");
+      const textNode = byId("banner-overdue-text");
+      textNode.replaceChildren(element("strong", "", overdue.length + " order" +
+        (overdue.length === 1 ? " is" : "s are") + " past pickup time: "),
+        document.createTextNode(first + (overdue.length > 3 ? " and more." : ".")));
+    }
+  }
+
+  // Segmented control over a real <select data-seg>. The select stays in the form (names unchanged);
+  // a click sets its value and fires the same "change" event the old select fired.
+  function enhanceSegments_() {
+    document.querySelectorAll("select[data-seg]:not(.is-enhanced)").forEach(function(select) {
+      const seg = element("span", "seg");
+      seg.setAttribute("role", "radiogroup");
+      Array.from(select.options).forEach(function(option) {
+        const button = element("button", "", option.textContent);
+        button.type = "button";
+        button.dataset.value = option.value;
+        button.setAttribute("role", "radio");
+        button.addEventListener("click", function() {
+          if (select.disabled) return;
+          if (select.value !== option.value) {
+            select.value = option.value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          syncSegment_(select);
+        });
+        seg.append(button);
+      });
+      select.classList.add("is-enhanced");
+      select.tabIndex = -1;
+      select.setAttribute("aria-hidden", "true");
+      select.after(seg);
+      select._seg = seg;
+      select.addEventListener("change", function() { syncSegment_(select); });
+      syncSegment_(select);
+    });
+  }
+
+  function syncSegment_(select) {
+    if (!select._seg) return;
+    select._seg.querySelectorAll("button").forEach(function(button) {
+      const on = button.dataset.value === select.value;
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-checked", String(on));
+      button.disabled = select.disabled;
+    });
+  }
+
+  function syncAllSegments_() {
+    document.querySelectorAll("select.is-enhanced").forEach(syncSegment_);
+  }
+
+  // Tabs: show the matching panel, hide the other panels of the same tab group.
+  function activateTab_(panelId) {
+    const tab = document.querySelector('.tab[data-tab="' + panelId + '"]');
+    if (!tab) return;
+    const group = tab.closest("[data-tabs]");
+    group.querySelectorAll(".tab").forEach(function(other) {
+      const on = other === tab;
+      other.classList.toggle("on", on);
+      other.setAttribute("aria-selected", String(on));
+      const panel = byId(other.dataset.tab);
+      if (panel) panel.hidden = !on;
+    });
+    if (tab.dataset.addLabel) {
+      const add = byId("catalog-add-button");
+      add.textContent = tab.dataset.addLabel;
+      add.dataset.openDialog = tab.dataset.addDialog;
+    }
+  }
+
+  // One-line summary of the order details (shown when the details overlay is closed).
+  function updateDetailsSummary_() {
+    const form = byId("order-form");
+    const typeSelect = form.elements.order_type;
+    const channelSelect = form.elements.order_channel;
+    const pickup = form.elements.pickup_at.value;
+    const summary = byId("details-summary");
+    summary.replaceChildren(element("b", "", typeSelect.options[typeSelect.selectedIndex].text));
+    summary.append(document.createTextNode(" · " + channelSelect.options[channelSelect.selectedIndex].text +
+      " channel · " + (pickup ? "pickup " + new Date(pickup).toLocaleString(undefined, {
+        day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit"
+      }) : "pickup now")));
+  }
+
+  function setDetailsOpen_(open) {
+    byId("details-panel").hidden = !open;
+    byId("details-toggle").setAttribute("aria-expanded", String(open));
+    byId("details-toggle").textContent = open ? "Hide ▴" : "Order details ▾";
+    if (!open) updateDetailsSummary_();
+  }
+
+  function bindPresentation_() {
+    enhanceSegments_();
+    // Shortcut buttons ("+ New order", "Go to Stock", banner "View orders").
+    document.querySelectorAll("[data-goto]").forEach(function(button) {
+      button.addEventListener("click", function() { showScreen(button.dataset.goto); });
+    });
+    // Drawers and modals.
+    document.addEventListener("click", function(event) {
+      const opener = event.target.closest("[data-open-dialog]");
+      if (opener) {
+        const dialog = byId(opener.dataset.openDialog);
+        if (dialog && !dialog.open) dialog.showModal();
+        return;
+      }
+      const closer = event.target.closest("[data-close-dialog]");
+      if (closer) {
+        const dialog = closer.closest("dialog");
+        if (dialog) dialog.close();
+      }
+    });
+    document.querySelectorAll("dialog").forEach(function(dialog) {
+      // Click on the dimmed backdrop closes drawers and modals.
+      dialog.addEventListener("click", function(event) {
+        if (event.target === dialog) dialog.close();
+      });
+    });
+    // Forms in drawers reset only after a successful save: close the drawer then.
+    document.querySelectorAll("dialog.drawer form").forEach(function(form) {
+      form.addEventListener("reset", function() {
+        const dialog = form.closest("dialog");
+        window.setTimeout(function() {
+          if (dialog && dialog.open && dialog.id !== "payment-dialog") dialog.close();
+          syncAllSegments_();
+        }, 0);
+      });
+    });
+    document.querySelectorAll("form").forEach(function(form) {
+      form.addEventListener("reset", function() { window.setTimeout(syncAllSegments_, 0); });
+    });
+    // Tabs.
+    document.querySelectorAll(".tab[data-tab]").forEach(function(tab) {
+      tab.addEventListener("click", function() {
+        activateTab_(tab.dataset.tab);
+        if (tab.dataset.tab === "stock-history") loadPriceHistory();
+      });
+    });
+    // Quantity stepper for #line-quantity.
+    document.querySelectorAll(".step-btn").forEach(function(button) {
+      button.addEventListener("click", function() {
+        const input = byId("line-quantity");
+        const value = Math.max(1, (parseInt(input.value, 10) || 1) + Number(button.dataset.step));
+        input.value = String(value);
+      });
+    });
+    // Discount "+ Add" reveals the existing discount field.
+    byId("discount-toggle").addEventListener("click", function() {
+      byId("discount-field").hidden = false;
+      byId("order-form").elements.discount.focus();
+    });
+    // Order details overlay.
+    byId("details-toggle").addEventListener("click", function() {
+      setDetailsOpen_(byId("details-panel").hidden);
+    });
+    byId("details-done").addEventListener("click", function() { setDetailsOpen_(false); });
+    ["order_type", "order_channel", "pickup_at"].forEach(function(name) {
+      byId("order-form").elements[name].addEventListener("change", updateDetailsSummary_);
+    });
+    byId("order-form").addEventListener("reset", function() {
+      window.setTimeout(function() {
+        setDetailsOpen_(false);
+        byId("discount-field").hidden = true;
+      }, 0);
+    });
+    // The pinned New-order cart sits under the banners: track their height for the layout.
+    const banners = document.querySelector(".banners");
+    const setBannerHeight = function() {
+      document.documentElement.style.setProperty("--banner-h", banners.offsetHeight + "px");
+    };
+    if (window.ResizeObserver) new ResizeObserver(setBannerHeight).observe(banners);
+    setBannerHeight();
+    // Keep "N min ago" and the stale state current. Display only: never loads data.
+    window.setInterval(updateSyncPill_, 30000);
+    window.addEventListener("online", updateSyncPill_);
+    window.addEventListener("offline", updateSyncPill_);
+    window.addEventListener("bakery:queue-updated", function() { window.setTimeout(updateSyncPill_, 0); });
+    updateDetailsSummary_();
+    updateSyncPill_();
+  }
+
   async function startApp() {
     addLoadingPlaceholders_();
     bindForms();
+    bindPresentation_();
     document.addEventListener("visibilitychange", refreshOnReturn_);
     window.addEventListener("focus", refreshOnReturn_);
     bindCurrencyPrecision();

@@ -44,12 +44,20 @@ function isStaffLoginEnabled_() {
 }
 
 // options.sections: when staff sign-in is off, the startup data comes back in the same call.
+// options.warm: staff sign-in is on and the user is typing: prepare the page data meanwhile.
 function getAuthConfig(options) {
   requireShopGoogleAccount_();
   const enabled = isStaffLoginEnabled_();
   const result = { staffLoginEnabled: enabled };
   if (!enabled && options && Array.isArray(options.sections)) {
     result.startup = safeStartup_(getCurrentStaff_(""), options);
+  } else if (enabled && options && options.warm) {
+    try {
+      ensureSchema_();
+      warmSections_(options);
+    } catch (error) {
+      console.warn("Warm-up skipped: " + error.message);
+    }
   }
   return result;
 }
@@ -69,12 +77,21 @@ function safeStartup_(staff, options) {
 function loginStaff(username, password, options) {
   requireShopGoogleAccount_();
   ensureSchema_();
-  forgetSharedTable_("StaffAccess");
   const normalizedUsername = normalizeUsername_(username);
   const passwordText = typeof password === "string" ? password : "";
-  const staff = readTable_("StaffAccess").find(function(record) {
-    return normalizeUsername_(record.username) === normalizedUsername;
-  });
+  const findStaff = function() {
+    return readTable_("StaffAccess").find(function(record) {
+      return normalizeUsername_(record.username) === normalizedUsername;
+    });
+  };
+  // Cached copy first (fast). If it does not match, read the sheet itself, so a username or
+  // password typed straight into the sheet works immediately.
+  let staff = findStaff();
+  if (!staff || !isEnabled_(staff.active) || String(staff.password || "") !== passwordText) {
+    forgetSharedTable_("StaffAccess");
+    delete tableMemo_.StaffAccess;
+    staff = findStaff();
+  }
   if (!staff || !isEnabled_(staff.active)) {
     throw new Error("Username or password is incorrect.");
   }
