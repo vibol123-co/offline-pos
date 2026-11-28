@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 
 
@@ -40,6 +41,20 @@ def main() -> None:
         encoding="utf-8",
     )
     (OUTPUT / ".nojekyll").write_text("", encoding="utf-8")
+    copy_static_files()
+
+
+def copy_static_files() -> None:
+    """Copies apps_script/web/ (app icons, manifest, product photos) into the site as-is."""
+    web = SOURCE / "web"
+    if not web.is_dir():
+        return
+    for path in web.rglob("*"):
+        if not path.is_file() or path.suffix.lower() == ".md":
+            continue
+        target = OUTPUT / path.relative_to(web)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
 
 
 if __name__ == "__main__":
