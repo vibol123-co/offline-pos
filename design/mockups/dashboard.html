@@ -1,0 +1,83 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Dashboard</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open dashboard.html?notes)
+  States: # = online, data fresh   #expired = Google sign-in expired (pill + banner with Reconnect button)
+  Restyle of <section id="screen-dashboard">. Data and rules are unchanged:
+  - KPIs: #kpi-orders (today, not cancelled), #kpi-sales-usd / #kpi-sales-khr (completed today), #kpi-low-stock.
+  - #dashboard-orders: up to 8 orders with status new / preparing / ready, newest first. Each row opens the order detail.
+  - #dashboard-stock: up to 8 low-stock items (name · on hand · unit).
+  - Sync pill states come from existing state: lastRefreshAt, navigator.onLine, queue count, accessTokenExpiresAt.
+-->
+<style>
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s4); margin-bottom: var(--s6); }
+  .kpi { padding: var(--s5); }
+  .kpi span { font-size: 13px; color: var(--ink-3); font-weight: 500; }
+  .kpi strong { display: block; font-size: var(--fs-2xl); font-weight: 700; letter-spacing: -.02em; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .kpi small { font-size: 12px; color: var(--ink-3); }
+  .kpi.warn { border-color: var(--warning-line); background: var(--warning-soft); }
+  .kpi.warn strong, .kpi.warn small { color: var(--warning); }
+  .cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: var(--s5); }
+  .compact-row { width: 100%; display: grid; grid-template-columns: 1fr auto auto; gap: var(--s4); align-items: center; padding: var(--s4) var(--s5); border: 0; border-bottom: 1px solid var(--line); background: #fff; text-align: left; cursor: pointer; }
+  .compact-row:last-child { border-bottom: 0; }
+  .compact-row:hover { background: var(--surface-2); }
+  .compact-row b { font-size: var(--fs-sm); display: block; } .compact-row p { font-size: 13px; color: var(--ink-3); }
+  .compact-row .go { color: var(--ink-3); font-size: 18px; }
+  .stockrow { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); padding: var(--s4) var(--s5); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
+  .stockrow:last-child { border-bottom: 0; }
+  @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(2, 1fr); } .cols { grid-template-columns: 1fr; } }
+  @media (max-width: 640px) { .kpi strong { font-size: 28px; } .kpi { padding: var(--s4); } .kpis { gap: var(--s3); } }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation">
+    <a href="#" class="active">Dashboard</a><a href="#">New order</a><a href="#">Orders</a><a href="#">Catalog</a><a href="#">Suppliers</a><a href="#">Stock</a><a href="#">Reports</a><a href="#">Settings</a>
+  </nav>
+  <div class="topbar-right"><button id="sync" class="sync ok" title="Refresh data" data-map="#refresh-button + #connection-status">Synced <span class="sync-time">· 2 min ago</span><svg class="sync-ico" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg></button><span class="user" data-map="#user-label + #switch-account-button"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+<div id="banner-expired" class="banner danger" hidden><span class="banner-icon">!</span><span><strong>Sign-in expired. Data can't refresh.</strong> Orders from other devices won't appear until you reconnect.</span><button class="btn btn-sm btn-primary banner-action">Reconnect</button></div>
+
+<main class="page">
+  <div class="page-head"><div><h1>Shop overview</h1><p>Today · Saturday 28 November</p></div><button class="btn btn-primary btn-lg">+ New order</button></div>
+
+  <div class="kpis">
+    <div class="card kpi"><span>Orders today</span><strong data-map="#kpi-orders">42</strong><small>Not counting cancelled</small></div>
+    <div class="card kpi"><span>Sales USD</span><strong data-map="#kpi-sales-usd">$618.40</strong><small>Completed orders</small></div>
+    <div class="card kpi"><span>Sales KHR</span><strong data-map="#kpi-sales-khr">៛1,240,000</strong><small>Completed orders</small></div>
+    <div class="card kpi warn"><span>Low-stock items</span><strong data-map="#kpi-low-stock">5</strong><small>Reorder needed</small></div>
+  </div>
+
+  <div class="cols">
+    <section class="card">
+      <div class="card-head"><h2>Orders needing attention</h2><span class="muted" style="font-size:13px">Newest first · tap to open</span></div>
+      <div data-map="#dashboard-orders">
+        <button class="compact-row" type="button"><div><b>BP-1128-A41F · Dara</b><p>Custom cake · pickup 10:00</p></div><span class="chip ready">Ready</span><span class="go">›</span></button>
+        <button class="compact-row" type="button"><div><b>BP-1128-B07C · Grab #5521</b><p>Delivery · pickup 11:30</p></div><span class="chip preparing">Preparing</span><span class="go">›</span></button>
+        <button class="compact-row" type="button"><div><b>BP-1128-D113 · Walk-in</b><p>Pickup 12:15</p></div><span class="chip new">New</span><span class="go">›</span></button>
+        <button class="compact-row" type="button"><div><b>BP-1127-C9E2 · Sokha</b><p>Advance order · tomorrow 09:00</p></div><span class="chip new">New</span><span class="go">›</span></button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Low stock</h2><span class="muted" style="font-size:13px">At or below threshold</span></div>
+      <div data-map="#dashboard-stock">
+        <div class="stockrow"><b>Butter (unsalted)</b><span class="chip danger">400 g</span></div>
+        <div class="stockrow"><b>Cake box 6"</b><span class="chip danger">6 each</span></div>
+        <div class="stockrow"><b>Whipping cream</b><span class="chip danger">1,500 ml</span></div>
+        <div class="stockrow"><b>Strawberries</b><span class="chip danger">800 g</span></div>
+      </div>
+      <div style="padding:var(--s4) var(--s5);border-top:1px solid var(--line)"><button class="btn btn-secondary btn-block">Go to Stock</button></div>
+    </section>
+  </div>
+</main>
+<script>
+if (location.hash === "#expired") {
+  var s = document.getElementById("sync");
+  s.outerHTML = '<span class="sync-group"><span class="sync err">Sign-in expired</span><button class="sync-btn danger">Reconnect</button></span>';
+  document.getElementById("banner-expired").hidden = false;
+}
+</script>
+<script src="notes.js"></script>
+</body></html>

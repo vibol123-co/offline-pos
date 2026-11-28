@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bakery POS Business Processes</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#ffffff; --ink:#1f1f1f; --muted:#666; --line:#e2e0da; --accent:#2f6f4f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  .top { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line);
+          padding:12px 16px; display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+  .top h1 { font-size:18px; margin:0; }
+  .top p { margin:0; color:var(--muted); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:8px; }
+  h2 { font-size:16px; margin:0; }
+  .sub { margin:2px 0 0; color:var(--muted); }
+  .file { margin:2px 0 0; color:var(--muted); font:12px ui-monospace, Consolas, monospace; }
+  .diagram { overflow-x:auto; background:#fff; }
+  .diagram svg { max-width:100%; height:auto; display:block; margin:0 auto; }
+  button { font:inherit; border:1px solid var(--accent); background:var(--accent); color:#fff;
+            border-radius:6px; padding:6px 12px; cursor:pointer; white-space:nowrap; }
+  button.secondary { background:#fff; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { font-size:13px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="top">
+  <div>
+    <h1>Bakery POS: business processes</h1>
+    <p>Generated from Process/Business/*.md. Save PNG downloads a picture of one diagram.</p>
+  </div>
+  <div>
+    <span id="status">Drawing diagrams…</span>
+    <button type="button" id="save-all" disabled>Save all PNG</button>
+  </div>
+</div>
+<main>
+
+  <section class="card" data-name="00-day-in-the-shop">
+    <header>
+      <div>
+        <h2>0. A day in the shop (end to end)</h2>
+        
+        <p class="file">00-day-in-the-shop.png</p>
+      </div>
+      <button type="button" class="save" data-index="0">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    subgraph Open[&quot;Opening&quot;]
+        O1[&quot;Open the POS link on the shop device&quot;] --&gt; O2[&quot;Connect the shop Google account&lt;br/&gt;(once per browser session)&quot;]
+        O2 --&gt; O3[&quot;Staff sign in with their POS username + password&quot;]
+        O3 --&gt; O4[&quot;Dashboard: orders needing attention,&lt;br/&gt;low-stock items, today&#x27;s sales&quot;]
+    end
+
+    subgraph Sell[&quot;Selling, all day&quot;]
+        S1[&quot;New Order: pick items, customer,&lt;br/&gt;channel, payment&quot;] --&gt; S2[&quot;Receipt shown;&lt;br/&gt;order status = new&quot;]
+        S2 --&gt; S3[&quot;Orders: Start preparing → Mark ready → Complete&quot;]
+        S3 --&gt; S4[&quot;Record payment for any balance due&quot;]
+        S1 -. &quot;deposit for advance / custom cake&quot; .-&gt; S4
+    end
+
+    subgraph Back[&quot;Back office, as needed&quot;]
+        B1[&quot;Stock: receive a supplier delivery&quot;]
+        B2[&quot;Stock: record waste / adjustment&quot;]
+        B3[&quot;Suppliers: add a supplier,&lt;br/&gt;Stock: record a price quote&quot;]
+        B4[&quot;Products &amp; Add-ons: add new items&quot;]
+    end
+
+    subgraph Close[&quot;Closing&quot;]
+        C1[&quot;Orders: check nothing is left open&lt;br/&gt;or cancel no-shows&quot;] --&gt; C2[&quot;Reports: sales by currency,&lt;br/&gt;stock movements, staff activity&quot;]
+        C2 --&gt; C3[&quot;Switch user / close browser&quot;]
+        C3 --&gt; C4[&quot;About 2 AM: automatic Drive backup&quot;]
+    end
+
+    Open --&gt; Sell --&gt; Close
+    Sell &lt;--&gt; Back
+</pre></div>
+  </section>
+  <section class="card" data-name="01-sign-in-and-roles-1">
+    <header>
+      <div>
+        <h2>1. Sign in, roles and page access</h2>
+        <p class="sub">Signing in</p>
+        <p class="file">01-sign-in-and-roles-1.png</p>
+      </div>
+      <button type="button" class="save" data-index="1">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Open the POS page&quot;] --&gt; B[&quot;Click &#x27;Connect&#x27; → Google pop-up&quot;]
+    B --&gt; C{&quot;Chose the shop&lt;br/&gt;Google account?&quot;}
+    C -- no --&gt; E1[&quot;Error: &#x27;Connect using the configured&lt;br/&gt;shop Google account&#x27;&quot;] --&gt; B
+    C -- yes --&gt; D[&quot;Username + password form appears&quot;]
+    D --&gt; F[&quot;Enter POS username + password&quot;]
+    F --&gt; G{&quot;Correct and&lt;br/&gt;account active?&quot;}
+    G -- &quot;wrong / disabled&quot; --&gt; E2[&quot;&#x27;Username or password is incorrect&#x27;&quot;] --&gt; F
+    G -- &quot;no password set&quot; --&gt; E3[&quot;&#x27;Ask an administrator&#x27;&quot;]
+    G -- yes --&gt; H[&quot;App opens (Dashboard by default),&lt;br/&gt;showing only the pages you may use&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="01-sign-in-and-roles-2">
+    <header>
+      <div>
+        <h2>1. Sign in, roles and page access</h2>
+        <p class="sub">Roles and pages</p>
+        <p class="file">01-sign-in-and-roles-2.png</p>
+      </div>
+      <button type="button" class="save" data-index="2">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    subgraph Admin[&quot;Admin: always all pages&quot;]
+        direction TB
+        a1[Dashboard] ~~~ a2[New Order] ~~~ a3[Orders] ~~~ a4[Products &amp; Add-ons]
+        a5[Suppliers] ~~~ a6[Stock] ~~~ a7[Reports] ~~~ a8[Settings]
+    end
+    subgraph Cashier[&quot;Cashier: only the pages an admin ticks&quot;]
+        direction TB
+        c1[&quot;Any of: Dashboard, New Order, Orders,&lt;br/&gt;Products, Suppliers, Stock, Reports&quot;]
+        c2[&quot;Never: Settings&quot;]
+    end
+</pre></div>
+  </section>
+  <section class="card" data-name="02-take-a-new-order">
+    <header>
+      <div>
+        <h2>2. Take a new order</h2>
+        
+        <p class="file">02-take-a-new-order.png</p>
+      </div>
+      <button type="button" class="save" data-index="3">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Open New Order&quot;] --&gt; B[&quot;Choose currency: USD or KHR&lt;br/&gt;(no automatic conversion)&quot;]
+    B --&gt; C[&quot;Tap product / add-on cards to add to cart&lt;br/&gt;or add a custom item with name + price&quot;]
+    C --&gt; D[&quot;Adjust quantities in the cart&quot;]
+    D --&gt; E[&quot;Customer phone (optional)&quot;]
+    E --&gt; F{&quot;Phone matches a&lt;br/&gt;previous customer?&quot;}
+    F -- yes --&gt; G[&quot;Name + location filled in automatically&quot;]
+    F -- no --&gt; H[&quot;Type name / location&quot;]
+    G &amp; H --&gt; I[&quot;Order type&quot;]
+    I --&gt; I1[&quot;Walk-in&quot;]
+    I --&gt; I2[&quot;Advance order&lt;br/&gt;set pickup date/time&quot;]
+    I --&gt; I3[&quot;Custom cake&lt;br/&gt;flavor, size, inscription + pickup time&quot;]
+    I1 &amp; I2 &amp; I3 --&gt; J[&quot;Channel&quot;]
+    J --&gt; J1[&quot;Walk-in → pickup&quot;]
+    J --&gt; J2[&quot;Grab → delivery&lt;br/&gt;delivery fee&quot;]
+    J --&gt; J3[&quot;Other&quot;]
+    J1 &amp; J2 &amp; J3 --&gt; K[&quot;Discount (optional)&quot;]
+    K --&gt; L[&quot;Amount paid now + method&lt;br/&gt;cash / card terminal / other&lt;br/&gt;(0 = pay later, part = deposit)&quot;]
+    L --&gt; M[&quot;Notes → Save order&quot;]
+    M --&gt; N{&quot;Server checks&quot;}
+    N -- &quot;item has no price in this currency&quot; --&gt; X1[&quot;Error: pick another currency or item&quot;]
+    N -- &quot;not enough linked stock&quot; --&gt; X2[&quot;Error: &#x27;Not enough stock for …&#x27;&quot;]
+    N -- &quot;discount &gt; subtotal&lt;br/&gt;or paid &gt; total&quot; --&gt; X3[&quot;Error: fix the amounts&quot;]
+    N -- OK --&gt; O[&quot;Receipt with order number BP-yyyyMMdd-XXXXXX&lt;br/&gt;status = new; cart cleared&quot;]
+    N -- &quot;device offline&quot; --&gt; P[&quot;Receipt shows &#x27;Pending sync&#x27;&lt;br/&gt;see 09-working-offline&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="03-order-lifecycle-1">
+    <header>
+      <div>
+        <h2>3. Order lifecycle</h2>
+        
+        <p class="file">03-order-lifecycle-1.png</p>
+      </div>
+      <button type="button" class="save" data-index="4">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">stateDiagram-v2
+    [*] --&gt; new: Order saved
+    new --&gt; preparing: Start preparing
+    new --&gt; ready: (allowed by server)
+    preparing --&gt; ready: Mark ready
+    ready --&gt; completed: Complete
+    new --&gt; cancelled: Cancel order
+    preparing --&gt; cancelled: Cancel order
+    ready --&gt; cancelled: Cancel order
+    completed --&gt; [*]
+    cancelled --&gt; [*]
+
+    note right of cancelled
+        Linked stock is given back.
+        Order stays in history.
+    end note
+    note right of completed
+        Counts toward sales
+        in Dashboard and Reports.
+    end note
+</pre></div>
+  </section>
+  <section class="card" data-name="03-order-lifecycle-2">
+    <header>
+      <div>
+        <h2>3. Order lifecycle</h2>
+        <p class="sub">What staff do on each order card</p>
+        <p class="file">03-order-lifecycle-2.png</p>
+      </div>
+      <button type="button" class="save" data-index="5">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    Card[&quot;Order card&lt;br/&gt;customer · number · channel · pickup time&lt;br/&gt;items · total · paid · due&quot;] --&gt; B1[&quot;Next-step button&lt;br/&gt;Start preparing / Mark ready / Complete&quot;]
+    Card --&gt; B2[&quot;Record payment&lt;br/&gt;(while not completed or cancelled)&quot;]
+    Card --&gt; B3[&quot;Cancel order&lt;br/&gt;(asks to confirm)&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="04-record-a-payment">
+    <header>
+      <div>
+        <h2>4. Record a payment</h2>
+        
+        <p class="file">04-record-a-payment.png</p>
+      </div>
+      <button type="button" class="save" data-index="6">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A{&quot;When?&quot;} --&gt;|At checkout| B[&quot;New Order → &#x27;Paid amount&#x27; + method&quot;]
+    A --&gt;|Later, e.g. at pickup| C[&quot;Orders → order card → Record payment&quot;]
+    C --&gt; D[&quot;Enter amount + method&lt;br/&gt;cash / card terminal / other&quot;]
+    B &amp; D --&gt; E{&quot;Checks&quot;}
+    E -- &quot;amount ≤ 0 or &gt; balance due&quot; --&gt; X1[&quot;Error&quot;]
+    E -- &quot;currency ≠ order currency&quot; --&gt; X2[&quot;Error: pay in the order&#x27;s currency&quot;]
+    E -- &quot;order cancelled&quot; --&gt; X3[&quot;Error: cannot receive payment&quot;]
+    E -- OK --&gt; F[&quot;Payment saved&lt;br/&gt;card shows new paid / due&quot;]
+    F --&gt; G{&quot;Balance due = 0?&quot;}
+    G -- yes --&gt; H[&quot;Fully paid. Complete the order when handed over&quot;]
+    G -- no --&gt; I[&quot;Partially paid. Take the rest later&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="05-products-and-addons">
+    <header>
+      <div>
+        <h2>5. Products and add-ons</h2>
+        
+        <p class="file">05-products-and-addons.png</p>
+      </div>
+      <button type="button" class="save" data-index="7">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Products &amp; Add-ons page&quot;] --&gt; B{&quot;Add what?&quot;}
+    B --&gt;|Product| P[&quot;Name, category, size&lt;br/&gt;USD price and/or KHR price&quot;]
+    P --&gt; P2{&quot;Track it in stock?&quot;}
+    P2 -- yes --&gt; P3[&quot;Link to a &#x27;finished product&#x27; stock item&quot;]
+    P2 -- no --&gt; P4[&quot;No link&quot;]
+    B --&gt;|Add-on| D[&quot;Name&lt;br/&gt;USD and/or KHR price&quot;]
+    D --&gt; D2{&quot;Track it in stock?&quot;}
+    D2 -- yes --&gt; D3[&quot;Link to an &#x27;accessory&#x27; or &#x27;packaging&#x27; stock item&lt;br/&gt;e.g. candles, boxes&quot;]
+    D2 -- no --&gt; D4[&quot;No link&quot;]
+    P3 &amp; P4 &amp; D3 &amp; D4 --&gt; S[&quot;Save → appears on New Order cards&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="06-suppliers-and-stock-1">
+    <header>
+      <div>
+        <h2>6. Suppliers, stock and price history</h2>
+        <p class="sub">Setting up</p>
+        <p class="file">06-suppliers-and-stock-1.png</p>
+      </div>
+      <button type="button" class="save" data-index="8">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    A[&quot;Suppliers page:&lt;br/&gt;add supplier&lt;br/&gt;name, phone, email, notes&quot;] --&gt; C
+    B[&quot;Stock page:&lt;br/&gt;add stock item&lt;br/&gt;name, category, unit g/ml/each,&lt;br/&gt;low-stock threshold&quot;] --&gt; C[&quot;Ready to receive stock&lt;br/&gt;and record prices&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="06-suppliers-and-stock-2">
+    <header>
+      <div>
+        <h2>6. Suppliers, stock and price history</h2>
+        <p class="sub">Day-to-day stock tasks</p>
+        <p class="file">06-suppliers-and-stock-2.png</p>
+      </div>
+      <button type="button" class="save" data-index="9">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    S[&quot;Stock page&quot;] --&gt; R &amp; W &amp; Q &amp; H
+    R[&quot;Receive delivery&quot;] --&gt; R1[&quot;Pick supplier, currency, reference/invoice no.&quot;]
+    R1 --&gt; R2[&quot;Add one or more lines:&lt;br/&gt;stock item, quantity, total cost&quot;]
+    R2 --&gt; R3[&quot;Save → stock goes UP&lt;br/&gt;purchase kept for price history&quot;]
+
+    W[&quot;Waste / adjustment&quot;] --&gt; W1{&quot;Type&quot;}
+    W1 -- &quot;Waste (spoiled, dropped)&quot; --&gt; W2[&quot;Quantity to remove&quot;]
+    W1 -- &quot;Adjustment (count correction)&quot; --&gt; W3[&quot;Add or remove quantity&quot;]
+    W2 &amp; W3 --&gt; W4{&quot;Would go below 0?&quot;}
+    W4 -- yes --&gt; W5[&quot;Error: cannot go negative&quot;]
+    W4 -- no --&gt; W6[&quot;Saved → stock updated&quot;]
+
+    Q[&quot;Record price quote&quot;] --&gt; Q1[&quot;Supplier, stock item,&lt;br/&gt;package size, price, date&quot;]
+    Q1 --&gt; Q2[&quot;Saved for comparison.&lt;br/&gt;Stock does NOT change&quot;]
+
+    H[&quot;Price history&quot;] --&gt; H1[&quot;Pick a stock item&quot;]
+    H1 --&gt; H2[&quot;Chart + list of purchases and quotes&lt;br/&gt;by supplier and date&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="07-dashboard-and-reports-1">
+    <header>
+      <div>
+        <h2>7. Dashboard and reports</h2>
+        <p class="sub">Dashboard: what needs attention right now</p>
+        <p class="file">07-dashboard-and-reports-1.png</p>
+      </div>
+      <button type="button" class="save" data-index="10">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart LR
+    D[&quot;Dashboard&quot;] --&gt; K1[&quot;Orders today&lt;br/&gt;(not cancelled)&quot;]
+    D --&gt; K2[&quot;Sales today USD&lt;br/&gt;(completed orders only)&quot;]
+    D --&gt; K3[&quot;Sales today KHR&lt;br/&gt;(completed orders only)&quot;]
+    D --&gt; K4[&quot;Low-stock count&quot;]
+    D --&gt; L1[&quot;Up to 8 open orders&lt;br/&gt;new / preparing / ready&lt;br/&gt;tap → order detail&quot;]
+    D --&gt; L2[&quot;Up to 8 low-stock items&lt;br/&gt;with quantity on hand&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="07-dashboard-and-reports-2">
+    <header>
+      <div>
+        <h2>7. Dashboard and reports</h2>
+        <p class="sub">Reports: a chosen period</p>
+        <p class="file">07-dashboard-and-reports-2.png</p>
+      </div>
+      <button type="button" class="save" data-index="11">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Reports page&quot;] --&gt; B[&quot;Pick From / To dates&quot;]
+    B --&gt; C[&quot;Run report&quot;]
+    C --&gt; R1[&quot;Orders in period&lt;br/&gt;(excludes cancelled)&quot;]
+    C --&gt; R2[&quot;Sales USD and Sales KHR&lt;br/&gt;(completed orders only)&quot;]
+    C --&gt; R3[&quot;Low-stock items (now)&quot;]
+    C --&gt; R4[&quot;Stock movements in period&quot;]
+    C --&gt; R5{&quot;Admin?&quot;}
+    R5 -- yes --&gt; R6[&quot;Staff activity: latest 200 actions&lt;br/&gt;time, staff, action, record&quot;]
+    R5 -- no --&gt; R7[&quot;Activity hidden&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="08-staff-and-settings">
+    <header>
+      <div>
+        <h2>8. Staff accounts and settings</h2>
+        <p class="sub">Add or change a staff account</p>
+        <p class="file">08-staff-and-settings.png</p>
+      </div>
+      <button type="button" class="save" data-index="12">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Settings → Staff access&quot;] --&gt; B{&quot;New or existing?&quot;}
+    B -- new --&gt; C[&quot;Clear form&quot;]
+    B -- existing --&gt; D[&quot;Pick the staff member from the list&quot;]
+    C &amp; D --&gt; E[&quot;Username (3–40: letters, numbers, . _ -)&lt;br/&gt;Display name&quot;]
+    E --&gt; F[&quot;Password (4–128 chars)&lt;br/&gt;required for new; blank = keep current&quot;]
+    F --&gt; G{&quot;Role&quot;}
+    G -- Admin --&gt; H[&quot;Gets every page automatically&quot;]
+    G -- Cashier --&gt; I[&quot;Tick the pages they may use&lt;br/&gt;(at least one, never Settings)&quot;]
+    H &amp; I --&gt; J[&quot;Active on/off&quot;]
+    J --&gt; K[&quot;Save&quot;]
+    K --&gt; L{&quot;Checks&quot;}
+    L -- &quot;username taken&quot; --&gt; X1[&quot;Error&quot;]
+    L -- &quot;would leave no active admin&lt;br/&gt;or you removing your own admin&quot; --&gt; X2[&quot;Error&quot;]
+    L -- OK --&gt; M[&quot;Saved&quot;]
+    M --&gt; N{&quot;Password changed&lt;br/&gt;or account turned on/off?&quot;}
+    N -- yes --&gt; O[&quot;That person is signed out everywhere&quot;]
+    N -- no --&gt; P[&quot;Takes effect on their next page load&quot;]
+</pre></div>
+  </section>
+  <section class="card" data-name="09-working-offline">
+    <header>
+      <div>
+        <h2>9. Working offline</h2>
+        
+        <p class="file">09-working-offline.png</p>
+      </div>
+      <button type="button" class="save" data-index="13">Save PNG</button>
+    </header>
+    <div class="diagram"><pre class="mermaid">flowchart TB
+    A[&quot;Internet drops while the POS is open&quot;] --&gt; B[&quot;Top bar shows Offline&quot;]
+    B --&gt; C[&quot;Keep working: save orders, status changes, payments, stock entries&quot;]
+    C --&gt; D[&quot;Each save shows: &#x27;Queued on this device.&lt;br/&gt;Not yet shared with other devices&#x27;&quot;]
+    D --&gt; E[&quot;New orders appear as &#x27;Pending sync&#x27;&lt;br/&gt;with no order number yet&quot;]
+    E --&gt; F{&quot;Internet back?&quot;}
+    F -- no --&gt; C
+    F -- yes --&gt; G[&quot;Queued actions are sent automatically, oldest first&quot;]
+    G --&gt; H{&quot;All accepted?&quot;}
+    H -- yes --&gt; I[&quot;Orders get real numbers;&lt;br/&gt;screens refresh&quot;]
+    H -- no --&gt; J[&quot;Message: &#x27;A queued action needs attention&#x27;&lt;br/&gt;(e.g. not enough stock). Fix it and redo&quot;]
+</pre></div>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  // Plain-SVG labels (no HTML inside the SVG) so the picture can be drawn onto a canvas and saved.
+  mermaid.initialize({ startOnLoad:false, theme:"default", htmlLabels:false,
+    flowchart:{ htmlLabels:false, useMaxWidth:false }, securityLevel:"strict" });
+
+  const status = document.getElementById("status");
+  const saveAll = document.getElementById("save-all");
+
+  function svgToPng(svg, name) {
+    return new Promise(function(resolve, reject) {
+      const clone = svg.cloneNode(true);
+      const box = svg.getBBox ? svg.viewBox.baseVal : null;
+      const width = Math.ceil((box && box.width) || svg.getBoundingClientRect().width);
+      const height = Math.ceil((box && box.height) || svg.getBoundingClientRect().height);
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      clone.setAttribute("width", width);
+      clone.setAttribute("height", height);
+      clone.style.maxWidth = "none";
+      const data = new XMLSerializer().serializeToString(clone);
+      const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(data);
+      const img = new Image();
+      img.onload = function() {
+        const scale = 2; // sharper picture
+        const pad = 24;
+        const canvas = document.createElement("canvas");
+        canvas.width = (width + pad * 2) * scale;
+        canvas.height = (height + pad * 2) * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width + pad * 2, height + pad * 2);
+        ctx.drawImage(img, pad, pad, width, height);
+        canvas.toBlob(function(blob) {
+          if (!blob) { reject(new Error("Could not create the picture.")); return; }
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = name + ".png";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function() { URL.revokeObjectURL(a.href); }, 2000);
+          resolve();
+        }, "image/png");
+      };
+      img.onerror = function() { reject(new Error("Could not load the diagram as an image.")); };
+      img.src = url;
+    });
+  }
+
+  function cardSvg(card) { return card.querySelector(".diagram svg"); }
+
+  document.querySelectorAll("button.save").forEach(function(button) {
+    button.addEventListener("click", function() {
+      const card = button.closest(".card");
+      const svg = cardSvg(card);
+      if (!svg) return;
+      svgToPng(svg, card.dataset.name).catch(function(e) { status.textContent = e.message; });
+    });
+  });
+
+  saveAll.addEventListener("click", async function() {
+    saveAll.disabled = true;
+    const cards = Array.from(document.querySelectorAll(".card"));
+    for (let i = 0; i < cards.length; i++) {
+      status.textContent = "Saving " + (i + 1) + " of " + cards.length + "…";
+      const svg = cardSvg(cards[i]);
+      if (svg) {
+        try { await svgToPng(svg, cards[i].dataset.name); } catch (e) { status.textContent = e.message; }
+        await new Promise(function(r) { setTimeout(r, 400); });
+      }
+    }
+    status.textContent = "Done. Check your Downloads folder (the browser may ask to allow multiple downloads).";
+    saveAll.disabled = false;
+  });
+
+  mermaid.run({ querySelector: "pre.mermaid" }).then(function() {
+    status.textContent = "14 diagrams ready.";
+    saveAll.disabled = false;
+  }).catch(function(e) {
+    status.textContent = "A diagram failed to draw: " + e.message;
+    saveAll.disabled = false;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Settings</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open settings.html?notes)
+  Restyle of <section id="screen-settings">. Fields unchanged: default_currency, tax_rate_basis_points,
+  khr_per_usd, khr_rounding_riel. Help text is static. The worked example box is an optional extra.
+  #staff-access-section (admins only) keeps its form, checkboxes and table; restyle with the same components.
+-->
+
+<style>
+  .cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: var(--s5); align-items: start; }
+  .group { padding: var(--s5); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 220px 1fr; gap: var(--s5); }
+  .group:last-of-type { border-bottom: 0; }
+  .group h3 { font-size: var(--fs-sm); font-weight: 700; }
+  .group .desc { font-size: 13px; color: var(--ink-3); margin-top: 4px; }
+  .fields { display: grid; gap: var(--s4); }
+  .help { font-size: 12px; color: var(--ink-3); margin-top: 2px; font-weight: 400; }
+  .affix { display: flex; height: var(--tap); border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; background: #fff; max-width: 320px; }
+  .affix span { display: flex; align-items: center; padding: 0 12px; background: var(--surface-2); color: var(--ink-3); font-size: var(--fs-sm); font-weight: 600; }
+  .affix span:first-child { border-right: 1px solid var(--line); }
+  .affix span:last-child { border-left: 1px solid var(--line); }
+  .affix b { flex: 1; display: flex; align-items: center; padding: 0 12px; font-weight: 700; font-size: var(--fs-md); color: var(--ink); font-variant-numeric: tabular-nums; }
+  .affix.focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+  .example { padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--info-soft); color: var(--info); font-size: 13px; }
+  .example b { font-variant-numeric: tabular-nums; }
+  .foot { padding: var(--s4) var(--s5); border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: var(--s3); background: var(--surface-2); border-radius: 0 0 var(--r-lg) var(--r-lg); }
+  .input-sm { max-width: 320px; }
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } }
+  .staff-grid { padding: var(--s5); display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: var(--s3); }
+  .table-scroll { overflow-x: auto; }
+  @media (max-width: 1100px) { .staff-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .group { grid-template-columns: 1fr; gap: var(--s3); } .staff-grid { grid-template-columns: 1fr; padding: var(--s4); } .card-head { flex-wrap: wrap; gap: var(--s3); } }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation">
+    <a href="#">Dashboard</a><a href="#">New order</a><a href="#">Orders</a><a href="#">Catalog</a><a href="#">Suppliers</a><a href="#">Stock</a><a href="#">Reports</a><a href="#" class="active">Settings</a>
+  </nav>
+  <div class="topbar-right"><button class="sync ok" title="Refresh data">Synced <span class="sync-time">· 1 min ago</span><svg class="sync-ico" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg></button><span class="user"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+
+<main class="page">
+  <div class="page-head"><div><h1>Settings</h1><p>Shop settings, exchange rate, backup and staff accounts</p></div></div>
+  <div class="cols">
+    <form class="card" id="settings-form">
+      <div class="group">
+        <div><h3>Currency &amp; tax</h3><p class="desc">Defaults for new orders.</p></div>
+        <div class="fields">
+          <label class="field">Default currency<span class="seg" style="width:max-content" data-map="default_currency"><span class="on">USD</span><span>KHR</span></span></label>
+          <label class="field">Tax rate<span class="affix" data-map="tax_rate_basis_points"><b>1000</b><span>basis points</span></span><span class="help">1000 = 10%. Applied to items after discount.</span></label>
+        </div>
+      </div>
+      <div class="group">
+        <div><h3>KHR exchange rate</h3><p class="desc">Used for KHR prices, KHR totals and change. Each order keeps the rate it was made with.</p></div>
+        <div class="fields">
+          <label class="field">Exchange rate (KHR per 1 USD)<span class="affix focus" data-map="khr_per_usd"><span>1 USD =</span><b>4100</b><span>៛</span></span><span class="help">0 = no rate: stored KHR prices are used and customers can't pay in the other currency.</span></label>
+          <label class="field">Round KHR to the nearest<span class="affix" data-map="khr_rounding_riel"><b>100</b><span>riel</span></span><span class="help">Matches the smallest note you give as change. Common values: 100, 500, 1000.</span></label>
+          <div class="example" data-build="optional">Example with these settings: <b>$24.31</b> → <b>៛99,700</b> · change for <b>$30.00</b> → <b>$5.69 / ៛23,300</b></div>
+        </div>
+      </div>
+      <div class="foot"><button class="btn btn-primary" type="button">Save settings</button></div>
+    </form>
+
+    <aside class="card card-pad">
+      <h2 style="font-size:var(--fs-md);font-weight:700">Backup</h2>
+      <p style="font-size:var(--fs-sm);color:var(--ink-2);margin-top:var(--s2)">Google Sheets keeps the history of the POS spreadsheet. To restore, open the sheet and use <b>File → Version history</b>.</p>
+      <div class="alert warning" style="margin-top:var(--s4);display:block">Once a month: File → Version history → <b>Name current version</b> so it's kept permanently.</div>
+    </aside>
+  </div>
+
+  <section class="card" style="margin-top:var(--s5)" data-map="#staff-access-section (admins only)">
+    <div class="card-head"><div><h2>POS user accounts</h2><p class="muted" style="font-size:13px">Usernames, passwords, roles and cashier page access. Passwords are visible to admins.</p></div><button class="btn btn-secondary btn-sm" data-map="#staff-access-clear">Clear form</button></div>
+    <div class="staff-grid" data-map="#staff-access-form">
+      <label class="field">Username<span class="input">sreypov</span></label>
+      <label class="field">Staff name<span class="input">Sreypov</span></label>
+      <label class="field">Password<span class="input">••••••</span></label>
+      <label class="field">Role<span class="seg"><span class="on">Cashier</span><span>Admin</span></span></label>
+      <div class="field" style="grid-column:1/-1">Cashier page access
+        <div style="display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:4px">
+          <span class="chip ready">✓ Dashboard</span><span class="chip ready">✓ New order</span><span class="chip ready">✓ Orders</span><span class="chip done">Products &amp; add-ons</span><span class="chip done">Suppliers</span><span class="chip done">Stock</span><span class="chip done">Reports</span>
+        </div>
+      </div>
+      <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center"><span class="field" style="flex-direction:row">☑ Account enabled</span><button class="btn btn-primary">Save staff access</button></div>
+    </div>
+    <div class="table-scroll"><table class="table" data-map="#staff-access-list">
+      <thead><tr><th>Username</th><th>Staff name</th><th>Password</th><th>Role</th><th>Page access</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>sreypov</td><td>Sreypov</td><td>••••••</td><td>Cashier</td><td>Dashboard, New order, Orders</td><td><span class="chip ready">Enabled</span></td><td class="num"><button class="btn btn-sm btn-secondary">Edit</button></td></tr>
+        <tr><td>owner</td><td>Shop owner</td><td>••••••</td><td>Admin</td><td>All pages</td><td><span class="chip ready">Enabled</span></td><td class="num"><button class="btn btn-sm btn-secondary">Edit</button></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</main>
+<script src="notes.js"></script>
+</body></html>

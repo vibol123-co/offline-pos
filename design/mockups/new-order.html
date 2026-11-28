@@ -1,0 +1,217 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>New order</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open new-order.html?notes for the overlay)
+  States: #  = default (paid in USD, change due)   #exact = paid exact in KHR (no change)   #details = order details expanded (custom cake)
+  Restyle of <section id="screen-new-order"> / <form id="order-form">. Keep every id and name.
+  - Each card tap adds a NEW cart line with the quantity in #line-quantity (existing behaviour, lines are not merged).
+  - Order details (order_type, order_channel, pickup_at, location, delivery_fee, notes, #cake-details) open in an
+    overlay over the cart column ("Order details ▾" opens, "Done" closes). The one-line summary is presentation only.
+    The fields stay inside #order-form so submit and validation are unchanged.
+  - amount_received pre-fills to the exact total in the chosen currency (existing behaviour).
+-->
+<style>
+  .layout { display: grid; grid-template-columns: minmax(0,1fr) 440px; min-height: calc(100vh - 64px - 45px); }
+  .catalog { padding: var(--s6); min-width: 0; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: center; margin-bottom: var(--s3); }
+  .qty { display: inline-flex; align-items: center; gap: var(--s2); margin-left: auto; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+  .qty .stepper { height: 44px; background: #fff; }
+  .hint { font-size: 13px; color: var(--ink-3); margin-bottom: var(--s4); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--s4); }
+  .item-card { position: relative; border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s4); min-height: 132px; display: flex; flex-direction: column; justify-content: space-between; background: var(--surface); text-align: left; }
+  .item-card-icon { width: 44px; height: 44px; border-radius: 10px; background: var(--brand-soft); display: grid; place-items: center; font-size: 22px; }
+  .item-card-name { font-size: var(--fs-sm); font-weight: 600; margin-top: var(--s3); display: block; }
+  .item-card-size { font-size: 12px; color: var(--ink-3); display: block; }
+  .item-card-price { font-weight: 700; font-size: var(--fs-md); margin-top: 4px; display: block; }
+  .item-card:disabled, .item-card.is-disabled { background: var(--surface-2); opacity: .6; }
+  .item-card.is-disabled .item-card-price { color: var(--danger); font-size: 13px; font-weight: 600; }
+  .qty-badge { position: absolute; top: 10px; right: 10px; background: var(--brand); color: #fff; font-size: 12px; font-weight: 700; border-radius: var(--r-pill); min-width: 24px; height: 24px; display: grid; place-items: center; padding: 0 7px; }
+  .item-card.in-cart { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
+
+  /* Cart column: pinned; lines scroll; checkout always visible */
+  /* Whole cart column scrolls; checkout sticks to its bottom so totals + Save never leave the screen */
+  .cart { border-left: 1px solid var(--line); background: var(--surface-2); display: flex; flex-direction: column; position: sticky; top: 0; height: calc(100vh - 109px); overflow-y: auto; }
+  .cart-sec { padding: var(--s4) var(--s5); border-bottom: 1px solid var(--line); background: var(--surface); }
+  .cart-sec h2 { font-size: var(--fs-sm); font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+  .match { margin-top: var(--s2); padding: 8px 12px; border-radius: var(--r-md); background: var(--info-soft); color: var(--info); font-size: 12.5px; display: flex; justify-content: space-between; align-items: center; gap: var(--s3); }
+  .details-sum { margin-top: var(--s3); display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: 13px; color: var(--ink-2); }
+  .details-sum b { color: var(--ink); }
+  .details-sum { flex-wrap: wrap; gap: var(--s2); }
+  /* Order details open as an overlay over the cart column (Done closes it); checkout stays reachable after Done */
+  .details { position: absolute; inset: 0; z-index: 20; background: var(--surface); display: flex; flex-direction: column; }
+  .details[hidden] { display: none; }
+  .details-head { display: flex; justify-content: space-between; align-items: center; padding: var(--s4) var(--s5); border-bottom: 1px solid var(--line); }
+  .details-head h2 { font-size: var(--fs-md); }
+  .details-body { padding: var(--s4) var(--s5); display: grid; gap: var(--s3); overflow: auto; }
+  .details-foot { margin-top: auto; padding: var(--s4) var(--s5); border-top: 1px solid var(--line); }
+  .subpanel { padding: var(--s3); border-radius: var(--r-md); background: var(--brand-soft); display: grid; gap: var(--s3); }
+  .subpanel h3 { font-size: 13px; color: var(--brand); }
+  .items-sec { flex: none; }
+  .line { display: grid; grid-template-columns: 1fr auto 70px 32px; gap: var(--s3); align-items: center; padding: 9px 0; border-bottom: 1px dashed var(--line); font-size: var(--fs-sm); }
+  .line:last-of-type { border-bottom: 0; }
+  .line small { display: block; color: var(--ink-3); font-size: 12px; }
+  .line .q { font-weight: 700; color: var(--ink-2); }
+  .line .amt { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .remove-item-button { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: #fff; color: var(--ink-3); font-size: 16px; display: grid; place-items: center; }
+  .link { color: var(--brand); font-size: 13px; font-weight: 600; }
+
+  .checkout { padding: var(--s4) var(--s5); background: var(--surface); margin-top: auto; border-top: 1px solid var(--line); flex: none; position: sticky; bottom: 0; box-shadow: 0 -8px 20px rgba(31,29,26,.06); }
+  .row { display: flex; justify-content: space-between; font-size: 13px; color: var(--ink-2); padding: 1px 0; font-variant-numeric: tabular-nums; }
+  .grand { margin: var(--s2) 0 var(--s3); padding: var(--s2) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: grid; }
+  .money-total { display: flex; justify-content: space-between; align-items: baseline; }
+  .money-total span { font-size: 13px; color: var(--ink-3); font-weight: 600; }
+  .money-total strong { font-size: 30px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  #order-total-usd-row strong { font-size: 24px; color: var(--ink-2); }
+  .received { display: flex; height: 52px; border: 1px solid var(--brand); border-radius: var(--r-md); box-shadow: 0 0 0 3px var(--brand-soft); overflow: hidden; background: #fff; margin-top: 6px; }
+  .received .amount { flex: 1; display: flex; align-items: center; padding: 0 14px; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .received .cur { display: flex; padding: 5px; gap: 4px; background: var(--surface-2); border-left: 1px solid var(--line); }
+  .received .cur span { display: grid; place-items: center; min-width: 52px; border-radius: 7px; font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  .received .cur span.on { background: var(--ink); color: #fff; }
+  .pay-row { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); margin-top: var(--s3); }
+  .change { margin-top: var(--s3); padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--success-soft); border: 1px solid var(--success-line); color: var(--success); display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--s4); }
+  .change .label { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+  .change .vals { display: grid; justify-items: end; }
+  .change .vals strong { font-size: 28px; font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .change .vals small { font-size: 15px; font-weight: 700; opacity: .85; }
+  .change.zero { background: var(--surface-2); border-color: var(--line); color: var(--ink-3); padding: 8px var(--s4); }
+  .change.zero .vals strong { font-size: 15px; }
+  .balance { display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; margin-top: var(--s2); color: var(--ink-2); }
+  .balance.due { color: var(--danger); }
+  .rate-note { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+
+  @media (max-width: 1100px) {
+    .layout { grid-template-columns: minmax(0,1fr) 380px; }
+    .catalog { padding: var(--s5); }
+    .qty { margin-left: 0; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    .layout { grid-template-columns: minmax(0,1fr); min-height: 0; }
+    .details { position: fixed; }
+    .catalog { padding: var(--s4); }
+    .grid { grid-template-columns: 1fr 1fr; gap: var(--s3); }
+    .item-card { min-height: 116px; padding: var(--s3); }
+    .cart { border-left: 0; border-top: 1px solid var(--line); position: static; height: auto; overflow: visible; }
+    .checkout { position: sticky; bottom: 0; box-shadow: 0 -8px 24px rgba(31,29,26,.08); }
+    .money-total strong { font-size: 26px; }
+  }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation">
+    <a href="#">Dashboard</a><a href="#" class="active">New order</a><a href="#">Orders</a><a href="#">Catalog</a><a href="#">Suppliers</a><a href="#">Stock</a><a href="#">Reports</a><a href="#">Settings</a>
+  </nav>
+  <div class="topbar-right"><button class="sync off" disabled data-map="#connection-status (offline)">Offline <span class="sync-time">· 2 queued</span></button><span class="user" data-map="#user-label"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+<div class="banner warning" data-map="#offline-banner"><span class="banner-icon">!</span><span><strong>Offline:</strong> new actions are queued on this device and will sync when connection returns. <span data-map="#pending-count">2 action(s) waiting on this device.</span></span></div>
+
+<form class="layout" id="order-form" onsubmit="return false">
+  <section class="catalog">
+    <div class="page-head" style="margin-bottom:var(--s4)"><div><h1>New order</h1><p>Pick the type, set the quantity, then tap an item.</p></div>
+      <span class="seg" data-map="#order-currency"><span class="on">USD</span><span>KHR</span></span></div>
+    <div class="toolbar">
+      <span class="seg" data-map="#line-type"><span class="on">Bakery products</span><span>Add-ons</span><span>Custom item</span></span>
+      <span class="qty">Qty for next tap <span class="stepper" data-map="#line-quantity"><b>−</b><span>1</span><b>+</b></span></span>
+    </div>
+    <p class="hint">Each tap adds one line. Different sizes are separate catalog items.</p>
+    <div class="grid" data-map="#item-card-grid">
+      <button class="item-card in-cart" type="button"><span class="qty-badge" data-build="optional">2</span><span class="item-card-icon">🥐</span><span><span class="item-card-name">Butter croissant</span><span class="item-card-size">Single</span><span class="item-card-price">$1.80</span></span></button>
+      <button class="item-card in-cart" type="button"><span class="qty-badge" data-build="optional">1</span><span class="item-card-icon">🍰</span><span><span class="item-card-name">Chocolate cake</span><span class="item-card-size">6"</span><span class="item-card-price">$18.00</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🍰</span><span><span class="item-card-name">Strawberry shortcake</span><span class="item-card-size">Slice</span><span class="item-card-price">$4.50</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🍞</span><span><span class="item-card-name">Sourdough loaf</span><span class="item-card-size">800 g</span><span class="item-card-price">$5.00</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🍞</span><span><span class="item-card-name">Baguette</span><span class="item-card-size">Regular</span><span class="item-card-price">$2.20</span></span></button>
+      <button class="item-card is-disabled" type="button" disabled><span class="item-card-icon">🍰</span><span><span class="item-card-name">Pandan chiffon</span><span class="item-card-size">8"</span><span class="item-card-price">Price unavailable</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🍪</span><span><span class="item-card-name">Cookie box</span><span class="item-card-size">6 pcs</span><span class="item-card-price">$6.00</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🥐</span><span><span class="item-card-name">Egg tart</span><span class="item-card-size">Single</span><span class="item-card-price">$1.50</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🧁</span><span><span class="item-card-name">Cupcake</span><span class="item-card-size">Vanilla</span><span class="item-card-price">$2.50</span></span></button>
+      <button class="item-card" type="button"><span class="item-card-icon">🍞</span><span><span class="item-card-name">Milk bread</span><span class="item-card-size">Loaf</span><span class="item-card-price">$3.20</span></span></button>
+    </div>
+  </section>
+
+  <aside class="cart">
+    <div class="cart-sec">
+      <div class="two">
+        <label class="field">Phone<span class="input" data-map="customer_phone">012 345 678</span></label>
+        <label class="field">Customer name<span class="input" data-map="customer_name">Dara</span></label>
+      </div>
+      <div class="match" data-map="#customer-match"><span>Found customer: Dara · St. 271</span><span class="link" style="color:var(--info)">Use saved details</span></div>
+      <div class="details-sum" id="details-sum"><span><b>Walk-in</b> · Walk-in channel · Pickup now</span><span class="link">Order details ▾</span></div>
+      <div class="details" id="details-panel" hidden>
+        <div class="details-head"><h2>Order details</h2><span class="muted" style="font-size:13px">Saved with the order</span></div>
+        <div class="details-body">
+        <div class="two">
+          <label class="field">Order type<span class="input" data-map="order_type">Custom cake ▾</span></label>
+          <label class="field">Channel<span class="input" data-map="order_channel">Walk-in ▾</span></label>
+        </div>
+        <div class="two">
+          <label class="field">Pickup / delivery time<span class="input" data-map="pickup_at">29/11 · 10:00</span></label>
+          <label class="field">Delivery fee<span class="input" data-map="delivery_fee">0.00</span></label>
+        </div>
+        <label class="field">Location / delivery address<span class="input" data-map="location" style="color:var(--ink-3)">Optional</span></label>
+        <div class="subpanel" data-map="#cake-details (custom cake only)">
+          <h3>Custom cake details</h3>
+          <div class="two"><label class="field">Flavor<span class="input">Chocolate</span></label><label class="field">Size<span class="input">8"</span></label></div>
+          <label class="field">Inscription / design notes<span class="input">Happy birthday Mony</span></label>
+        </div>
+        <label class="field">Order notes<span class="input" data-map="notes" style="color:var(--ink-3)">Optional</span></label>
+        </div>
+        <div class="details-foot"><button class="btn btn-primary btn-block" type="button">Done</button></div>
+      </div>
+    </div>
+    <div class="cart-sec items-sec">
+      <h2>Items <span class="muted" style="font-size:12px;font-weight:500" data-map="#cart-item-count">3 line(s) · 4 item(s)</span></h2>
+      <div data-map="#cart-lines">
+        <div class="line"><span>Butter croissant<small>Single · $1.80 each</small></span><span class="q">× 2</span><span class="amt">$3.60</span><button type="button" class="remove-item-button">×</button></div>
+        <div class="line"><span>Chocolate cake<small>6" · $18.00 each</small></span><span class="q">× 1</span><span class="amt">$18.00</span><button type="button" class="remove-item-button">×</button></div>
+        <div class="line"><span>Candles<small>Add-on · $0.50 each</small></span><span class="q">× 1</span><span class="amt">$0.50</span><button type="button" class="remove-item-button">×</button></div>
+      </div>
+    </div>
+
+    <div class="checkout">
+      <div class="row"><span>Items subtotal</span><span data-map="#order-subtotal-preview">$22.10</span></div>
+      <div class="row"><span>Delivery fee</span><span>$0.00</span></div>
+      <div class="row"><span>Discount <span class="link" data-map="discount">+ Add</span></span><span>$0.00</span></div>
+      <div class="row"><span>Tax</span><span data-map="#order-tax-preview">$2.21</span></div>
+      <div class="grand">
+        <div class="money-total" id="order-total-khr-row" data-map="#order-total-khr-row"><span>Total (KHR)</span><strong>៛99,700</strong></div>
+        <div class="money-total" id="order-total-usd-row" data-map="#order-total-usd-row"><span>Total (USD)</span><strong>$24.31</strong></div>
+      </div>
+      <span class="field">Amount received</span>
+      <div class="received">
+        <span class="amount" id="amount-display" data-map="amount_received">$30.00</span>
+        <span class="cur" data-map="received_currency"><span id="cur-usd" class="on">USD</span><span id="cur-khr">KHR</span></span>
+      </div>
+      <div class="pay-row">
+        <span class="field">Payment method</span>
+        <span class="seg" data-map="payment_method"><span class="on">Cash</span><span>Card terminal</span><span>Other</span></span>
+      </div>
+      <div class="change" id="change-box" data-map="#order-change-usd-row + #order-change-khr-row">
+        <span class="label">Change<br>to give</span>
+        <span class="vals"><strong>$5.69</strong><small>or ៛23,300</small></span>
+      </div>
+      <div class="balance" id="balance" data-map="#order-balance-preview"><span>Balance due</span><span>$0.00</span></div>
+      <p class="rate-note" data-map="#order-rate-note">Exchange rate: 1 USD = ៛4,100 · KHR rounded to ៛100.</p>
+      <button class="btn btn-primary btn-lg btn-block" style="margin-top:var(--s3)" type="submit">Save order &amp; show receipt</button>
+    </div>
+  </aside>
+</form>
+<script>
+// Mockup state switches only.
+if (location.hash === "#exact") {
+  document.getElementById("amount-display").textContent = "៛99,700";
+  document.getElementById("cur-usd").className = "";
+  document.getElementById("cur-khr").className = "on";
+  var box = document.getElementById("change-box");
+  box.className = "change zero";
+  box.innerHTML = '<span class="label">Change</span><span class="vals"><strong>No change due</strong></span>';
+}
+if (location.hash === "#details") {
+  document.getElementById("details-panel").hidden = false;
+  document.getElementById("details-sum").innerHTML = '<span><b>Custom cake</b> · pickup 29/11 10:00</span><span class="link">Hide ▴</span>';
+}
+</script>
+<script src="notes.js"></script>
+</body></html>

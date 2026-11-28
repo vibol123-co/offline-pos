@@ -1,0 +1,117 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stock</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open stock.html?notes)
+  States: # = On hand tab (refresh in progress)   #receive = "Receive a purchase" drawer open   #history = Price history tab
+  Restyle of <section id="screen-stock">. Suppliers stays its own page (separate staff page permission).
+  - The 4 existing forms move into drawers opened from buttons; fields, names and submit handlers unchanged:
+    #receive-stock-form ("Receive delivery"), #stock-adjustment-form ("Adjust / waste"),
+    #inventory-form ("New stock item"), #quote-form ("Record price quote", on the Price history tab).
+  - Tabs "On hand" / "Price history" only show/hide existing panels (presentation).
+  - Stock table columns are the real ones: Item, Category, On hand, Low threshold, Status (Low/OK), History (View).
+  - #stock-refresh is removed: the top-bar sync pill refreshes all data.
+-->
+<style>
+  .tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--line); margin-bottom: var(--s5); }
+  .tabs span { padding: 10px 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-3); border-bottom: 2px solid transparent; }
+  .tabs span.on { color: var(--ink); border-color: var(--ink); }
+  .head-acts { display: flex; flex-wrap: wrap; gap: var(--s3); }
+  tr.low td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
+  tr.low .onhand { color: var(--danger); font-weight: 700; }
+  .cat { font-size: 12px; color: var(--ink-3); text-transform: capitalize; }
+  .chart { height: 200px; border-radius: var(--r-md); background: linear-gradient(180deg, #fff, var(--surface-2)); position: relative; overflow: hidden; border: 1px solid var(--line); }
+  .chart svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .panel-pad { padding: var(--s5); }
+
+  .scrim { position: fixed; inset: 0; background: rgba(31,29,26,.28); }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 100%; background: var(--surface); box-shadow: var(--shadow-2); display: flex; flex-direction: column; }
+  .drawer header { padding: var(--s5); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: flex-start; }
+  .drawer h2 { font-size: var(--fs-lg); }
+  .drawer .body { padding: var(--s5); display: grid; gap: var(--s4); align-content: start; }
+  .drawer footer { margin-top: auto; padding: var(--s5); border-top: 1px solid var(--line); display: flex; gap: var(--s3); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+  body:not(.show-drawer) .scrim, body:not(.show-drawer) .drawer { display: none; }
+  .is-hidden { display: none !important; }
+  @media (max-width: 640px) { .table .hide-sm { display: none; } .table td, .table th { padding-left: var(--s3); padding-right: var(--s3); } }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation">
+    <a href="#">Dashboard</a><a href="#">New order</a><a href="#">Orders</a><a href="#">Catalog</a><a href="#">Suppliers</a><a href="#" class="active">Stock</a><a href="#">Reports</a><a href="#">Settings</a>
+  </nav>
+  <div class="topbar-right"><button class="sync busy" disabled data-map="#refresh-button (busy)">Refreshing…<svg class="sync-ico" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg></button><span class="user"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+
+<main class="page">
+  <div class="page-head"><div><h1>Stock</h1><p>On hand, deliveries, waste and supplier prices</p></div>
+    <div class="head-acts"><button class="btn btn-secondary" data-map="opens #stock-adjustment-form">Adjust / waste</button><button class="btn btn-primary" data-map="opens #receive-stock-form">+ Receive delivery</button></div></div>
+
+  <div class="tabs"><span class="on" id="tab-onhand">On hand</span><span id="tab-history">Price history</span></div>
+
+  <section id="panel-onhand">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s4)"><span class="muted" style="font-size:13px">5 of 48 items are low</span><button class="btn btn-ghost" data-map="opens #inventory-form">+ New stock item</button></div>
+    <section class="card" data-map="#stock-table">
+      <table class="table">
+        <thead><tr><th>Item</th><th class="hide-sm">Category</th><th class="num">On hand</th><th class="num hide-sm">Low threshold</th><th>Status</th><th class="num">History</th></tr></thead>
+        <tbody>
+          <tr class="low"><td><b>Butter (unsalted)</b></td><td class="hide-sm cat">ingredient</td><td class="num onhand">400 g</td><td class="num hide-sm">2,000 g</td><td><span class="chip danger">Low</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr class="low"><td><b>Cake box 6"</b></td><td class="hide-sm cat">packaging</td><td class="num onhand">6 each</td><td class="num hide-sm">20 each</td><td><span class="chip danger">Low</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr class="low"><td><b>Whipping cream</b></td><td class="hide-sm cat">ingredient</td><td class="num onhand">1,500 ml</td><td class="num hide-sm">2,000 ml</td><td><span class="chip danger">Low</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr><td><b>Bread flour</b></td><td class="hide-sm cat">ingredient</td><td class="num">24,000 g</td><td class="num hide-sm">5,000 g</td><td><span class="chip ready">OK</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr><td><b>Sugar</b></td><td class="hide-sm cat">ingredient</td><td class="num">12,500 g</td><td class="num hide-sm">3,000 g</td><td><span class="chip ready">OK</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr><td><b>Chocolate cake 6"</b></td><td class="hide-sm cat">finished product</td><td class="num">3 each</td><td class="num hide-sm">2 each</td><td><span class="chip ready">OK</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+          <tr><td><b>Candles</b></td><td class="hide-sm cat">accessory</td><td class="num">140 each</td><td class="num hide-sm">30 each</td><td><span class="chip ready">OK</span></td><td class="num"><button class="btn btn-sm btn-secondary">View</button></td></tr>
+        </tbody>
+      </table>
+    </section>
+    <p class="muted" style="font-size:13px;margin-top:var(--s4)">Ingredient usage in recipes is not deducted automatically yet. Record production, waste and corrections as stock movements.</p>
+  </section>
+
+  <section id="panel-history" class="is-hidden">
+    <div style="display:flex;justify-content:space-between;align-items:end;gap:var(--s3);margin-bottom:var(--s4);flex-wrap:wrap">
+      <label class="field" style="min-width:280px">Stock item<span class="input" data-map="#price-history-item">Butter (unsalted) ▾</span></label>
+      <button class="btn btn-secondary" data-map="opens #quote-form">+ Record price quote</button>
+    </div>
+    <section class="card panel-pad">
+      <div class="chart" data-map="#price-history-chart"><svg viewBox="0 0 600 200" preserveAspectRatio="none"><polyline fill="none" stroke="#8a4f24" stroke-width="3" points="0,140 100,130 200,120 300,125 400,90 500,80 600,70"/></svg></div>
+      <table class="table" style="margin-top:var(--s4)" data-map="#price-history-table">
+        <thead><tr><th>Date</th><th>Type</th><th>Supplier</th><th class="num">Quantity</th><th class="num">Total cost</th><th class="num">Unit cost</th><th>Currency</th></tr></thead>
+        <tbody>
+          <tr><td>25/11/2026</td><td>Purchase</td><td>Lucky Dairy</td><td class="num">5,000 g</td><td class="num">$46.00</td><td class="num">$9.20 / kg</td><td>USD</td></tr>
+          <tr><td>12/11/2026</td><td>Quote</td><td>Green Farm</td><td class="num">1,000 g</td><td class="num">$9.80</td><td class="num">$9.80 / kg</td><td>USD</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </section>
+</main>
+
+<div class="scrim"></div>
+<aside class="drawer" data-map="#receive-stock-form">
+  <header><div><p class="muted" style="font-size:13px">Stock</p><h2>Receive a purchase</h2></div><button class="btn btn-ghost btn-sm">✕</button></header>
+  <div class="body">
+    <label class="field">Supplier<span class="input" data-map="supplier_id">Lucky Dairy ▾</span></label>
+    <label class="field">Stock item<span class="input" data-map="inventory_item_id">Butter (unsalted) ▾</span></label>
+    <div class="two">
+      <label class="field">Quantity in base units<span class="input focus" data-map="quantity">5000</span></label>
+      <label class="field">Total purchase cost<span class="input" data-map="total_cost">46.00</span></label>
+    </div>
+    <div class="two">
+      <label class="field">Currency<span class="seg" data-map="currency (#receive-currency)"><span class="on">USD</span><span>KHR</span></span></label>
+      <label class="field">Receipt reference<span class="input" data-map="reference" style="color:var(--ink-3)">Optional</span></label>
+    </div>
+  </div>
+  <footer><button class="btn btn-secondary" style="flex:1">Cancel</button><button class="btn btn-primary" style="flex:2">Receive stock</button></footer>
+</aside>
+<script>
+if (location.hash === "#receive") document.body.classList.add("show-drawer");
+if (location.hash === "#history") {
+  document.getElementById("panel-onhand").classList.add("is-hidden");
+  document.getElementById("panel-history").classList.remove("is-hidden");
+  document.getElementById("tab-onhand").className = "";
+  document.getElementById("tab-history").className = "on";
+}
+</script>
+<script src="notes.js"></script>
+</body></html>

@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Phone preview</title>
+<style>
+  html, body { margin: 0; background: #e9e7e3; font: 12px "Segoe UI", Arial, sans-serif; }
+  .wrap { display: grid; justify-items: center; padding: 16px 0; gap: 8px; }
+  .cap { color: #57534e; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  iframe { width: 390px; border: 0; border-radius: 18px; background: #fff; box-shadow: 0 0 0 8px #1f1d1a, 0 12px 30px rgba(0,0,0,.25); }
+</style></head>
+<body>
+<div class="wrap"><span class="cap" id="cap"></span><iframe id="f"></iframe></div>
+<script>
+  // Usage: phone-frame.html?src=new-order.html&h=2200&hash=payment
+  var q = new URLSearchParams(location.search);
+  var f = document.getElementById("f");
+  f.style.height = (q.get("h") || 844) + "px";
+  f.src = q.get("src") + (q.get("hash") ? "#" + q.get("hash") : "");
+  document.getElementById("cap").textContent = "Phone · 390 px · " + q.get("src") + (q.get("hash") ? " #" + q.get("hash") : "");
+</script>
+</body></html>

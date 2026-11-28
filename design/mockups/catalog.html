@@ -1,0 +1,111 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Catalog</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open catalog.html?notes)
+  States: # = Products tab   #add = "Add bakery product" drawer
+  Restyle of <section id="screen-products"> (menu label "Catalog"; data-screen and page permission stay "products").
+  - Tabs Products / Add-ons show/hide existing panels. "+ Add" opens #product-form or #addon-form in a drawer
+    depending on the tab; fields and names unchanged (name, category, size, price_usd, price_khr, inventory_item_id, image).
+  - Tables are renderCatalogTable(): Photo, Name (+ size), Category, USD, KHR, Stock link. KHR "from rate" label
+    shows only when Fx.rate() is set.
+  - No edit/delete of existing items exists today: do not add row actions.
+  - Pink items (missing-price alert, search, category filter, stock-count chips) are optional display-only extras.
+-->
+
+<style>
+  .tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--line); margin-bottom: var(--s5); }
+  .tabs span { padding: 10px 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-3); border-bottom: 2px solid transparent; }
+  .tabs span.on { color: var(--ink); border-color: var(--ink); }
+  .tabs .n { margin-left: 6px; color: var(--ink-3); font-weight: 500; }
+  .bar { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: center; margin-bottom: var(--s4); }
+  .search { width: 300px; height: var(--tap); border: 1px solid var(--line-strong); border-radius: var(--r-md); display: flex; align-items: center; padding: 0 14px; color: var(--ink-3); font-size: var(--fs-sm); }
+  .ph { width: 44px; height: 44px; border-radius: 10px; background: var(--brand-soft); display: grid; place-items: center; font-size: 22px; }
+  .ph.none { background: var(--surface-2); color: var(--ink-3); font-size: 11px; font-weight: 600; }
+  .name b { display: block; } .name small { color: var(--ink-3); font-size: 12px; }
+  .auto { display: block; font-size: 11px; color: var(--ink-3); }
+  tr.warn td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
+  .link-stock { display: inline-flex; align-items: center; gap: 6px; }
+  .rate-hint { margin-left: auto; font-size: 13px; color: var(--ink-3); }
+  .rate-hint b { color: var(--ink); }
+
+  .scrim { position: fixed; inset: 0; background: rgba(31,29,26,.28); }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 460px; max-width: 100%; background: var(--surface); box-shadow: var(--shadow-2); display: flex; flex-direction: column; }
+  .drawer header { padding: var(--s5); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: flex-start; }
+  .drawer h2 { font-size: var(--fs-lg); }
+  .drawer .body { padding: var(--s5); display: grid; gap: var(--s4); align-content: start; overflow: auto; }
+  .drawer footer { margin-top: auto; padding: var(--s5); border-top: 1px solid var(--line); display: flex; gap: var(--s3); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+  .photo-drop { display: flex; align-items: center; gap: var(--s4); padding: var(--s3); border: 1px dashed var(--line-strong); border-radius: var(--r-md); font-size: 13px; color: var(--ink-3); }
+  .help { font-size: 12px; color: var(--ink-3); font-weight: 400; }
+  .input.readonly { background: var(--surface-2); color: var(--ink-2); }
+  body:not(.show-drawer) .scrim, body:not(.show-drawer) .drawer { display: none; }
+
+  @media (max-width: 640px) {
+    .search { width: 100%; }
+    .rate-hint { margin-left: 0; }
+    .table .hide-sm { display: none; }
+    .table td, .table th { padding-left: var(--s3); padding-right: var(--s3); }
+  }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation (label 'Catalog' = data-screen products)">
+    <a href="#">Dashboard</a><a href="#">New order</a><a href="#">Orders</a><a href="#" class="active">Catalog</a><a href="#">Suppliers</a><a href="#">Stock</a><a href="#">Reports</a><a href="#">Settings</a>
+  </nav>
+  <div class="topbar-right"><button class="sync ok" title="Refresh data">Synced <span class="sync-time">· 1 min ago</span><svg class="sync-ico" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg></button><span class="user"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+
+<main class="page">
+  <div class="page-head"><div><h1>Catalog</h1><p>What the till sells: bakery products and add-ons, with prices</p></div>
+    <button class="btn btn-primary">+ Add product</button></div>
+
+  <div class="alert danger" style="margin-bottom:var(--s5);align-items:center" data-build="optional"><span class="banner-icon" style="background:var(--danger)">!</span><span><strong>1 product has no USD price</strong> and can't be sold in USD: Pandan chiffon · 8".</span><button class="btn btn-sm btn-secondary" style="margin-left:auto">Show it</button></div>
+
+  <div class="tabs"><span class="on">Products<span class="n">24</span></span><span>Add-ons<span class="n">8</span></span></div>
+
+  <div class="bar">
+    <div class="search" data-build="optional">⌕&nbsp; Search name or category</div>
+    <div class="seg" data-build="optional"><span class="on">All</span><span>Cakes</span><span>Bread</span><span>Pastry</span><span>Cookies</span></div>
+    <span class="rate-hint">KHR prices from rate <b>1 USD = ៛4,100</b>, rounded to ៛100</span>
+  </div>
+
+  <section class="card" data-map="#products-table (Add-ons tab: #addons-table)">
+    <table class="table">
+      <thead><tr><th style="width:68px">Photo</th><th>Product</th><th class="hide-sm">Category</th><th class="num">USD</th><th class="num">KHR</th><th class="hide-sm">Stock link</th></tr></thead>
+      <tbody>
+        <tr class="warn"><td><span class="ph">🍰</span></td><td class="name"><b>Pandan chiffon</b><small>8"</small></td><td class="hide-sm">Cake</td><td class="num"><span class="chip danger">No price</span></td><td class="num">—</td><td class="hide-sm muted">—</td></tr>
+        <tr><td><span class="ph">🎂</span></td><td class="name"><b>Chocolate cake</b><small>6"</small></td><td class="hide-sm">Cake</td><td class="num"><b>$18.00</b></td><td class="num">៛73,800<span class="auto">from rate</span></td><td class="hide-sm"><span class="link-stock">Chocolate cake 6" <span class="chip ready" data-build="optional">3 left</span></span></td></tr>
+        <tr><td><span class="ph">🎂</span></td><td class="name"><b>Chocolate cake</b><small>8"</small></td><td class="hide-sm">Cake</td><td class="num"><b>$26.00</b></td><td class="num">៛106,600<span class="auto">from rate</span></td><td class="hide-sm"><span class="link-stock">Chocolate cake 8" <span class="chip danger">0 left</span></span></td></tr>
+        <tr><td><span class="ph">🥐</span></td><td class="name"><b>Butter croissant</b><small>Single</small></td><td class="hide-sm">Pastry</td><td class="num"><b>$1.80</b></td><td class="num">៛7,400<span class="auto">from rate</span></td><td class="hide-sm muted">Not linked</td></tr>
+        <tr><td><span class="ph">🍰</span></td><td class="name"><b>Strawberry shortcake</b><small>Slice</small></td><td class="hide-sm">Cake</td><td class="num"><b>$4.50</b></td><td class="num">៛18,500<span class="auto">from rate</span></td><td class="hide-sm"><span class="link-stock">Shortcake slice <span class="chip pending">2 left</span></span></td></tr>
+        <tr><td><span class="ph">🍞</span></td><td class="name"><b>Sourdough loaf</b><small>800 g</small></td><td class="hide-sm">Bread</td><td class="num"><b>$5.00</b></td><td class="num">៛20,500<span class="auto">from rate</span></td><td class="hide-sm muted">Not linked</td></tr>
+        <tr><td><span class="ph none">No photo</span></td><td class="name"><b>Baguette</b><small>Regular</small></td><td class="hide-sm">Bread</td><td class="num"><b>$2.20</b></td><td class="num">៛9,000<span class="auto">from rate</span></td><td class="hide-sm muted">Not linked</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <p class="muted" style="font-size:13px;margin-top:var(--s4)">Different sizes are separate products. KHR is calculated from USD when an exchange rate is set in Settings.</p>
+</main>
+
+<div class="scrim"></div>
+<aside class="drawer" data-map="#product-form">
+  <header><div><p class="muted" style="font-size:13px">Catalog · Products</p><h2>Add bakery product</h2></div><button class="btn btn-ghost btn-sm">✕</button></header>
+  <div class="body">
+    <label class="field">Name<span class="input focus">Matcha roll cake</span></label>
+    <div class="two">
+      <label class="field">Category<span class="input">Cake</span></label>
+      <label class="field">Size / option<span class="input">Whole</span></label>
+    </div>
+    <div class="two">
+      <label class="field">Price (USD)<span class="input"><b>$14.00</b></span></label>
+      <label class="field">Price (KHR)<span class="input readonly">៛57,400</span><span class="help">Auto from rate. Used only when no rate is set.</span></label>
+    </div>
+    <label class="field">Linked finished stock item (optional)<span class="input">Matcha roll cake ▾</span><span class="help">Selling it reserves stock. Leave empty for items made to order.</span></label>
+    <div class="field">Photo (optional)<div class="photo-drop"><span class="ph">🍥</span><span class="input" style="flex:1;color:var(--ink-3)">matcha-roll.jpg or https://…</span></div><span class="help">Preview updates as you type. Shown on the New order card.</span></div>
+  </div>
+  <footer><button class="btn btn-secondary" style="flex:1">Cancel</button><button class="btn btn-primary" style="flex:2">Save product</button></footer>
+</aside>
+<script>if (location.hash === "#add") document.body.classList.add("show-drawer");</script>
+<script src="notes.js"></script>
+</body></html>

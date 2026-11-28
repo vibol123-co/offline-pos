@@ -1,0 +1,144 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Orders</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open orders.html?notes)
+  States: # = list (data stale: amber pill + Refresh button)   #payment = Record payment dialog
+  Restyle of <section id="screen-orders">, renderOrderCard(), #payment-dialog. Keep ids, names and handlers.
+  - Card content is what renderOrderCard() already builds: customer, status, meta line, items, total/paid/due, actions.
+  - Actions per status are unchanged: next-status button, Record payment + Cancel order (not completed/cancelled),
+    .receipt-reprint-button (every order). Pending-sync orders show "Waiting to sync" instead of actions.
+  - Card can be laid out as a row on desktop and stacked on tablet/phone (CSS only).
+  - #payment-change-preview: today one text string. Splitting it into "change" and "still due" lines is
+    presentation work in renderPaymentChange_(). Error texts ("Check amount", rate missing) use the red variant.
+-->
+<style>
+  .range { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: end; margin-bottom: var(--s3); }
+  .range .field { min-width: 150px; }
+  .filters { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: center; margin-bottom: var(--s3); }
+  .search { flex: 1; min-width: 240px; max-width: 420px; height: var(--tap); border: 1px solid var(--line-strong); border-radius: var(--r-md); display: flex; align-items: center; padding: 0 14px; color: var(--ink-3); font-size: var(--fs-sm); }
+  .summary-line { font-size: 13px; color: var(--ink-2); margin-bottom: var(--s3); }
+  .summary-line b { color: var(--ink); }
+
+  .open-strip { margin-bottom: var(--s5); }
+  .open-strip .head { display: flex; align-items: center; gap: var(--s3); }
+  .open-strip .chips { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+  .open-order-chip { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: var(--r-pill); border: 1px solid var(--danger-line); background: #fff; color: var(--ink); font-size: 13px; font-weight: 600; }
+  .link-button { margin-left: auto; background: none; border: 0; color: #8e231b; font-weight: 700; font-size: 13px; text-decoration: underline; }
+
+  .order-card { display: grid; grid-template-columns: 4px minmax(240px,1.6fr) minmax(150px,1fr) 130px 430px; gap: var(--s5); align-items: center; padding: var(--s4) var(--s5); border-bottom: 1px solid var(--line); }
+  .order-card:last-child { border-bottom: 0; }
+  .order-card .bar { width: 4px; height: 44px; border-radius: 4px; background: transparent; }
+  .order-card.overdue .bar { background: var(--danger); }
+  .order-card h3 { font-size: var(--fs-sm); font-weight: 700; }
+  .order-meta { font-size: 12.5px; color: var(--ink-3); }
+  .order-items { margin: 2px 0 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--ink-2); }
+  .order-items li { display: inline; } .order-items li + li::before { content: " · "; color: var(--ink-3); }
+  .order-total { text-align: right; font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
+  .order-total .due { color: var(--danger); font-weight: 700; font-size: 13px; display: block; }
+  .order-total .paid { color: var(--success); font-weight: 600; font-size: 13px; display: block; }
+  .order-actions { display: flex; flex-wrap: wrap; gap: var(--s2); justify-content: flex-end; align-items: center; }
+  .cancel-button { background: transparent; border: 0; color: var(--danger); font-weight: 600; font-size: 13px; min-height: 36px; padding: 0 8px; }
+  .receipt-reprint-button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border-radius: var(--r-md); border: 1px solid var(--line); background: #fff; color: var(--ink-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .receipt-reprint-button svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linejoin: round; }
+  .order-card.final h3, .order-card.final .order-total { color: var(--ink-2); }
+  .waiting { font-size: 13px; color: var(--warning); font-weight: 600; }
+  .orders-more { display: flex; justify-content: center; padding: var(--s4); border-top: 1px solid var(--line); }
+
+  /* #payment-dialog */
+  .scrim { position: fixed; inset: 0; background: rgba(31,29,26,.28); }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 100%; background: var(--surface); box-shadow: var(--shadow-2); display: flex; flex-direction: column; }
+  .drawer header { padding: var(--s5); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: flex-start; }
+  .drawer h2 { font-size: var(--fs-lg); }
+  .drawer .body { padding: var(--s5); display: grid; gap: var(--s4); align-content: start; }
+  .context { padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--surface-2); font-size: 13.5px; color: var(--ink-2); }
+  .context b { color: var(--danger); }
+  .received { display: flex; height: 52px; border: 1px solid var(--brand); border-radius: var(--r-md); box-shadow: 0 0 0 3px var(--brand-soft); overflow: hidden; margin-top: 6px; }
+  .received .amount { flex: 1; display: flex; align-items: center; padding: 0 14px; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .received .cur { display: flex; padding: 5px; gap: 4px; background: var(--surface-2); border-left: 1px solid var(--line); }
+  .received .cur span { display: grid; place-items: center; min-width: 52px; border-radius: 7px; font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  .received .cur span.on { background: var(--ink); color: #fff; }
+  .change-preview { padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--success-soft); border: 1px solid var(--success-line); color: var(--success); }
+  .change-preview .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .change-preview .lbl { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+  .change-preview strong { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .change-preview .still { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--success-line); font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; }
+  .change-preview.error { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger); font-size: 13px; font-weight: 600; }
+  .methods { display: grid; grid-template-columns: repeat(3,1fr); gap: var(--s2); margin-top: 6px; }
+  .methods span { padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md); text-align: center; font-size: 13px; font-weight: 600; }
+  .methods span.on { border: 2px solid var(--brand); color: var(--brand); }
+  body:not(.show-drawer) .scrim, body:not(.show-drawer) .drawer { display: none; }
+  .drawer footer { margin-top: auto; padding: var(--s5); border-top: 1px solid var(--line); display: flex; gap: var(--s3); }
+
+  @media (max-width: 1100px) {
+    .order-card { grid-template-columns: 4px 1fr 120px; row-gap: var(--s3); }
+    .order-card > .st { grid-column: 2; grid-row: 2; }
+    .order-card > .order-actions { grid-column: 2 / -1; justify-content: flex-start; }
+  }
+  @media (max-width: 640px) {
+    .search { max-width: none; }
+    .range .field { min-width: 0; flex: 1; }
+    .order-card { padding: var(--s4); gap: var(--s3); }
+    .order-card > .order-actions .btn, .order-card > .order-actions .receipt-reprint-button { flex: 1 1 auto; justify-content: center; }
+    .alert { flex-wrap: wrap; }
+  }
+</style></head>
+<body>
+<header class="topbar">
+  <div class="logo"><span class="logo-mark">B</span><span class="logo-text">Bakery POS</span></div>
+  <nav class="nav" data-map=".navigation">
+    <a href="#">Dashboard</a><a href="#">New order</a><a href="#" class="active">Orders</a><a href="#">Catalog</a><a href="#">Suppliers</a><a href="#">Stock</a><a href="#">Reports</a><a href="#">Settings</a>
+  </nav>
+  <div class="topbar-right"><span class="sync-group" data-map="#refresh-button (stale)"><span class="sync stale">Last synced <span class="sync-time">14 min ago</span></span><button class="sync-btn warning"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg>Refresh</button></span><span class="user"><span class="avatar">SR</span><span class="user-name">Sreypov</span></span></div>
+</header>
+
+<main class="page">
+  <div class="page-head"><div><h1>Orders</h1><p>Fulfillment and payments</p></div><button class="btn btn-primary">+ New order</button></div>
+
+  <section class="alert danger open-strip" data-map="#open-orders-strip" style="display:block">
+    <div class="head"><span class="banner-icon" style="background:var(--danger)">!</span><strong data-map="#open-orders-title">2 open orders from earlier days</strong><button class="link-button" data-map="#open-orders-toggle">Hide</button></div>
+    <div class="chips" data-map="#open-orders-list"><button class="open-order-chip">BP-1126-F0A1 · Bopha · <span class="chip ready">Ready</span></button><button class="open-order-chip">BP-1127-C9E2 · Sokha · <span class="chip new">New</span></button></div>
+  </section>
+
+  <form class="range" data-map="#orders-range-form" onsubmit="return false">
+    <label class="field">From<span class="input">27/11/2026</span></label>
+    <label class="field">To<span class="input">28/11/2026</span></label>
+    <span class="seg"><span>Today</span><span class="on">Yesterday + today</span><span>Last 7 days</span><span>This month</span><span>Last month</span></span>
+    <button class="btn btn-secondary">Search</button>
+  </form>
+  <div class="filters">
+    <div class="search" data-map="#orders-search">⌕&nbsp; Search customer or order number</div>
+    <span class="input" style="min-width:170px" data-map="#orders-status">All statuses ▾</span>
+  </div>
+  <p class="summary-line" data-map="#orders-summary">27/11 – 28/11 · <b>42 orders</b> · USD <b>$214.80</b> · KHR <b>៛386,000</b> · cancelled not counted</p>
+
+  <section class="card" data-map="#orders-list">
+    <article class="order-card overdue"><span class="bar" data-build="optional"></span><div><h3>Dara</h3><p class="order-meta">BP-1128-A41F · walk_in · pickup · 28/11 10:02</p><ul class="order-items"><li>Chocolate cake · 8" × 1</li><li>Candles × 1</li></ul></div><div class="st"><span class="chip ready">Ready</span><p class="order-meta" style="margin-top:4px">Pickup 28/11 10:00 <span style="color:var(--danger);font-weight:600" data-build="optional">· overdue</span></p></div><div class="order-total">$24.31<span class="due">due $4.31</span></div><div class="order-actions"><button class="btn btn-sm btn-primary">Complete</button><button class="btn btn-sm btn-secondary">Record payment</button><button class="receipt-reprint-button"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>View / reprint receipt</button><button class="cancel-button">Cancel order</button></div></article>
+    <article class="order-card"><span class="bar"></span><div><h3>Grab #5521</h3><p class="order-meta">BP-1128-B07C · grab · delivery · 28/11 09:40</p><ul class="order-items"><li>Butter croissant × 2</li><li>Sourdough loaf · 800 g × 1</li></ul></div><div class="st"><span class="chip preparing">Preparing</span><p class="order-meta" style="margin-top:4px">Pickup 28/11 11:30</p></div><div class="order-total">$12.60<span class="paid">paid</span></div><div class="order-actions"><button class="btn btn-sm btn-primary">Mark ready</button><button class="btn btn-sm btn-secondary">Record payment</button><button class="receipt-reprint-button"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>View / reprint receipt</button><button class="cancel-button">Cancel order</button></div></article>
+    <article class="order-card"><span class="bar"></span><div><h3>Vanna</h3><p class="order-meta">Pending sync · walk_in · pickup</p><ul class="order-items"><li>Cookie box · 6 pcs × 2</li></ul></div><div class="st"><span class="chip pending">Pending sync</span></div><div class="order-total">$12.00<span class="paid">paid</span></div><div class="order-actions"><span class="waiting">Waiting to sync</span><button class="receipt-reprint-button"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>View / reprint receipt</button></div></article>
+    <article class="order-card final"><span class="bar"></span><div><h3>Walk-in customer</h3><p class="order-meta">BP-1128-C210 · walk_in · pickup · 28/11 09:12</p><ul class="order-items"><li>Baguette × 2</li><li>Egg tart × 4</li></ul></div><div class="st"><span class="chip done">Completed</span></div><div class="order-total">$10.40<span class="paid">paid</span></div><div class="order-actions"><button class="receipt-reprint-button"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>View / reprint receipt</button></div></article>
+    <article class="order-card final"><span class="bar"></span><div><h3>Rithy</h3><p class="order-meta">BP-1128-B904 · walk_in · pickup · 28/11 08:15</p><ul class="order-items"><li>Cupcake · Vanilla × 6</li></ul></div><div class="st"><span class="chip danger">Cancelled</span></div><div class="order-total" style="text-decoration:line-through">$15.00</div><div class="order-actions"><button class="receipt-reprint-button"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>View / reprint receipt</button></div></article>
+    <div class="orders-more"><button class="btn btn-secondary" data-map="#orders-more">Show more</button></div>
+  </section>
+</main>
+
+<div class="scrim"></div>
+<aside class="drawer" data-map="#payment-dialog">
+  <header><h2>Record payment</h2><button class="btn btn-ghost btn-sm" data-map="#payment-cancel">✕</button></header>
+  <div class="body">
+    <p class="context" data-map="#payment-order-context">BP-1128-A41F · remaining balance <b>$4.31 / ៛17,700</b></p>
+    <div>
+      <span class="field">Amount received</span>
+      <div class="received"><span class="amount" data-map="amount">៛20,000</span><span class="cur" data-map="currency"><span>USD</span><span class="on">KHR</span></span></div>
+    </div>
+    <div class="change-preview" data-map="#payment-change-preview">
+      <div class="top"><span class="lbl">Change</span><strong>៛2,300 / $0.56</strong></div>
+      <div class="still"><span>Still due after this payment</span><b>$0.00</b></div>
+    </div>
+    <div class="field">Method<div class="methods" data-map="method"><span class="on">Cash</span><span>Card terminal</span><span>Other</span></div></div>
+  </div>
+  <footer><button class="btn btn-secondary" style="flex:1">Cancel</button><button class="btn btn-primary" style="flex:2">Save payment</button></footer>
+</aside>
+<script>if (location.hash === "#payment") document.body.classList.add("show-drawer");</script>
+<script src="notes.js"></script>
+</body></html>

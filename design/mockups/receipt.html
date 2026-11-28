@@ -1,0 +1,133 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Receipt</title>
+<link rel="stylesheet" href="tokens.css">
+<!--
+  BUILD NOTES (open receipt.html?notes)
+  Restyle of #receipt-dialog / #receipt-sheet. Content is built by showReceipt(); keep its rows and order.
+  - #receipt-customer-details rows: Date, Customer, Phone, Order type, Fulfillment, Pickup / delivery time,
+    Location, Payment method. Rows whose value is "—" may be hidden (optional, presentation).
+  - #receipt-totals rows: Items subtotal, Delivery fee, Discount, Tax, Total (KHR), Total (USD), Exchange rate,
+    one "Received <date> (<method>)" per payment, and "Change" when change > 0.
+    Zero Delivery fee / Discount rows may be hidden (optional). Give "Change" rows a class for the box style.
+  - #receipt-dialog.is-reprint: show the REPRINT header + watermark (the status text already says REPRINT).
+  - Print: @media print hides app + dialog buttons; black only; @page { size: 80mm auto; margin: 0 }.
+-->
+
+<style>
+  body { background: #e9e7e3; }
+  .stage { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s6); max-width: 1200px; margin: 0 auto; padding: var(--s6); align-items: start; }
+  .cap { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); margin-bottom: var(--s3); }
+
+  /* On-screen dialog (#receipt-dialog) */
+  .dialog { background: #fff; border-radius: var(--r-lg); box-shadow: var(--shadow-2); overflow: hidden; max-width: 460px; }
+  .dialog .acts { display: flex; gap: var(--s2); padding: var(--s4); border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  .dialog .acts .btn svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .dialog .sheet-wrap { padding: var(--s5); display: grid; justify-items: center; }
+
+  /* Receipt sheet: 80 mm roll = ~72 mm printable (≈ 272 px). Same CSS for screen and print. */
+  .sheet { width: 300px; background: #fff; color: #000; font: 12.5px/1.4 "Segoe UI", Arial, sans-serif; padding: 14px 14px 18px; position: relative; }
+  .print .sheet { box-shadow: 0 2px 10px rgba(0,0,0,.12); }
+  .sheet .center { text-align: center; }
+  .sheet .shop { font-size: 16px; font-weight: 800; letter-spacing: .02em; }
+  .sheet .small { font-size: 11px; color: #333; }
+  .sheet hr { border: 0; border-top: 1px dashed #000; margin: 8px 0; }
+  .sheet hr.solid { border-top: 1.5px solid #000; }
+  .sheet .num { font-size: 15px; font-weight: 800; margin-top: 2px; }
+  .sheet dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 0; font-size: 11.5px; }
+  .sheet dt { color: #333; } .sheet dd { margin: 0; text-align: right; }
+  .sheet table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .sheet th { text-align: left; font-size: 10.5px; text-transform: uppercase; border-bottom: 1px solid #000; padding: 2px 0; }
+  .sheet td { padding: 3px 0; vertical-align: top; }
+  .sheet .r { text-align: right; white-space: nowrap; }
+  .sheet .q { text-align: center; width: 28px; }
+  /* #receipt-totals rows: label wraps, amount never wraps */
+  .totals > div { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 1.5px 0; }
+  .totals strong { font-weight: 600; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+  .totals .receipt-grand-total { font-size: 16px; font-weight: 800; padding: 3px 0; }
+  .totals .receipt-grand-total strong { font-weight: 800; }
+  .totals .receipt-grand-total + .receipt-grand-total { font-size: 14px; border-bottom: 1.5px solid #000; padding-bottom: 6px; margin-bottom: 4px; }
+  .totals .rate { font-size: 11px; color: #333; }
+  .totals .change { font-weight: 800; font-size: 13.5px; border: 1.5px solid #000; padding: 4px 6px; margin-top: 4px; }
+  .totals .change strong { font-weight: 800; }
+  .state { margin-top: 8px; padding: 5px; text-align: center; font-weight: 700; background: #000; color: #fff; font-size: 12px; }
+  .qr { display: grid; grid-template-columns: 56px 1fr; gap: 8px; align-items: center; margin-top: 10px; font-size: 11px; }
+  .qr i { width: 56px; height: 56px; border: 2px solid #000; display: block; background: repeating-linear-gradient(90deg,#000 0 4px,#fff 4px 8px), #fff; opacity: .85; }
+
+  /* REPRINT mark: #receipt-dialog.is-reprint */
+  .reprint-mark { display: none; }
+  .is-reprint .reprint-mark { display: block; margin: 0 0 8px; padding: 4px 0; text-align: center; border: 2px solid #000; font-weight: 900; font-size: 15px; letter-spacing: .35em; }
+  .is-reprint .reprint-mark small { display: block; letter-spacing: 0; font-size: 10.5px; font-weight: 600; }
+  .is-reprint .sheet::after { content: "REPRINT"; position: absolute; top: 45%; left: 50%; transform: translate(-50%,-50%) rotate(-28deg); font-size: 54px; font-weight: 900; letter-spacing: .1em; color: rgba(0,0,0,.07); pointer-events: none; }
+
+  .notes { margin-top: var(--s4); font-size: 13px; color: var(--ink-2); display: grid; gap: 6px; }
+  .notes b { color: var(--ink); }
+  @media (max-width: 760px) { .stage { grid-template-columns: 1fr; padding: var(--s4); } }
+</style></head>
+<body>
+<div class="stage">
+  <section>
+    <p class="cap">On screen · after "Save order" (normal receipt)</p>
+    <div class="dialog" id="receipt-dialog">
+      <div class="acts"><button class="btn btn-primary" style="flex:1"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4V11a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7h-2M6 14h12v7H6z"/></svg>Print receipt</button><button class="btn btn-secondary">Close</button></div>
+      <div class="sheet-wrap">
+        <article class="sheet">
+          <div class="reprint-mark">REPRINT</div>
+          <div class="center"><div class="shop">BAKERY POS</div><div class="small">Order receipt</div><div class="num">BP-20261128-A41F</div><div class="small">Order saved</div></div>
+          <hr>
+          <dl data-map="#receipt-customer-details"><dt>Date</dt><dd>28/11/2026 10:02</dd><dt>Customer</dt><dd>Dara</dd><dt>Phone</dt><dd>012 345 678</dd><dt>Order type</dt><dd>custom cake</dd><dt>Fulfillment</dt><dd>walk_in · pickup</dd><dt>Pickup / delivery</dt><dd>28/11/2026 10:00</dd><dt>Payment method</dt><dd>cash</dd></dl>
+          <hr>
+          <table><thead><tr><th>Item</th><th class="q">Qty</th><th class="r">Amount</th></tr></thead>
+            <tbody><tr><td>Butter croissant</td><td class="q">2</td><td class="r">$3.60</td></tr><tr><td>Chocolate cake · 6"</td><td class="q">1</td><td class="r">$18.00</td></tr><tr><td>Candles</td><td class="q">1</td><td class="r">$0.50</td></tr></tbody></table>
+          <hr>
+          <div class="totals" id="receipt-totals">
+            <div><span>Items subtotal</span><strong>$22.10</strong></div>
+            <div><span>Tax</span><strong>$2.21</strong></div>
+            <div class="receipt-grand-total"><span>Total (KHR)</span><strong>៛99,700</strong></div>
+            <div class="receipt-grand-total"><span>Total (USD)</span><strong>$24.31</strong></div>
+            <div class="rate"><span>Exchange rate</span><strong>1 USD = ៛4,100</strong></div>
+            <div><span>Received 28/11/2026 (cash)</span><strong>$30.00</strong></div>
+            <div class="change"><span>Change</span><strong>$5.69 / ៛23,300</strong></div>
+          </div>
+          <div class="state" id="receipt-payment-state">Paid $24.31 · Balance due $0.00</div>
+          <div class="qr"><i></i><span><b>Payment QR</b><br>The shop payment QR image will appear here once provided.</span></div>
+          <hr><div class="center small">Thank you for supporting our bakery!</div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="cap">Print preview · 80 mm roll · reprint from Orders</p>
+    <div class="print is-reprint" data-map="#receipt-dialog.is-reprint" style="display:grid;justify-items:center;background:#fff;padding:var(--s5);border-radius:var(--r-lg)">
+      <article class="sheet">
+        <div class="reprint-mark">REPRINT<small>Printed 28/11/2026 15:40 · status: completed</small></div>
+        <div class="center"><div class="shop">BAKERY POS</div><div class="small">Order receipt</div><div class="num">BP-20261128-A41F</div></div>
+        <hr>
+        <dl><dt>Date</dt><dd>28/11/2026 10:02</dd><dt>Customer</dt><dd>Dara</dd><dt>Phone</dt><dd>012 345 678</dd><dt>Order type</dt><dd>custom cake</dd><dt>Fulfillment</dt><dd>walk_in · pickup</dd><dt>Pickup / delivery</dt><dd>28/11/2026 10:00</dd><dt>Payment method</dt><dd>cash</dd></dl>
+        <hr>
+        <table><thead><tr><th>Item</th><th class="q">Qty</th><th class="r">Amount</th></tr></thead>
+          <tbody><tr><td>Butter croissant</td><td class="q">2</td><td class="r">$3.60</td></tr><tr><td>Chocolate cake · 6"</td><td class="q">1</td><td class="r">$18.00</td></tr><tr><td>Candles</td><td class="q">1</td><td class="r">$0.50</td></tr></tbody></table>
+        <hr>
+        <div class="totals">
+          <div><span>Items subtotal</span><strong>$22.10</strong></div>
+          <div><span>Tax</span><strong>$2.21</strong></div>
+          <div class="receipt-grand-total"><span>Total (KHR)</span><strong>៛99,700</strong></div>
+          <div class="receipt-grand-total"><span>Total (USD)</span><strong>$24.31</strong></div>
+          <div class="rate"><span>Exchange rate</span><strong>1 USD = ៛4,100</strong></div>
+          <div><span>Received 28/11/2026 (cash)</span><strong>$20.00</strong></div>
+          <div><span>Received 28/11/2026 (card terminal)</span><strong>៛20,000</strong></div>
+          <div class="change"><span>Change</span><strong>$0.56 / ៛2,300</strong></div>
+        </div>
+        <div class="state">Paid $24.31 · Balance due $0.00</div>
+        <hr><div class="center small">Thank you for supporting our bakery!</div>
+      </article>
+    </div>
+    <div class="notes">
+      <span><b>Print:</b> black only, no shadows or tints. Hide the app and dialog buttons with <code>@media print</code>, set <code>@page { size: 80mm auto; margin: 0 }</code>.</span>
+      <span><b>Narrow rows:</b> label wraps and amount never wraps, so long "Received … (card terminal)" labels stay readable.</span>
+      <span><b>Zero rows:</b> Delivery fee and Discount are hidden when they are 0 (presentation only).</span>
+    </div>
+  </section>
+</div>
+<script src="notes.js"></script>
+</body></html>
