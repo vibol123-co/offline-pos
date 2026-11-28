@@ -1,5 +1,17 @@
 <script>
-  const State = { data: null, cart: [], activeScreen: "dashboard", loading: false, orderCurrency: "USD" };
+  const State = { data: null, cart: [], activeScreen: "dashboard", loading: false, orderCurrency: "USD", ready: {} };
+  // Which data sections each page needs. The open page loads first; the rest load in the background.
+  const PAGE_SECTIONS = {
+    dashboard: ["orders", "stock"],
+    "new-order": ["catalog", "customers"],
+    orders: ["orders"],
+    products: ["catalog"],
+    suppliers: ["suppliers"],
+    stock: ["catalog", "stock", "suppliers"],
+    reports: [],
+    settings: ["staff"]
+  };
+  const ALL_SECTIONS = ["orders", "stock", "catalog", "customers", "suppliers", "staff"];
   const CURRENCY_EXPONENTS = { USD: 2, KHR: 0 };
   const DATABASE_NAME = "bakery-pos-github";
   const API_CONFIG = window.BAKERY_POS_CONFIG || {};
@@ -11,7 +23,10 @@
     "https://www.googleapis.com/auth/script.scriptapp"
   ].join(" ");
   let databasePromise;
-  let refreshTimer;
+  let sectionChain = Promise.resolve();
+  let refreshInFlight = null;
+  let refreshQueued = false;
+  let lastRefreshAt = 0;
   let customerLookupTimer;
   let customerLookupSequence = 0;
   let matchedCustomer;
@@ -21,10 +36,22 @@
   let accessTokenExpiresAt = 0;
   let firstTokenRequest = true;
   let staffSessionToken = "";
+  let staffLoginDisabled = false;
+  const STAFF_LOGIN_DISABLED_TOKEN = "staff-login-disabled";
+  const NO_SESSION_METHODS = ["loginStaff", "getAuthConfig"];
 
   const DataService = Object.freeze({
-    loginStaff(username, password) {
-      return callServer_("loginStaff", [username, password]);
+    getAuthConfig(options) {
+      return callServer_("getAuthConfig", [options || {}]);
+    },
+    loginStaff(username, password, options) {
+      return callServer_("loginStaff", [username, password, options || {}]);
+    },
+    getSections(names, options) {
+      return callServer_("getSections", [names, options || {}]);
+    },
+    getOrderHistory(params) {
+      return callServer_("getOrderHistory", [params]);
     },
     logoutStaff() {
       return callServer_("logoutStaff", []);
@@ -111,10 +138,11 @@
   });
 
   function callServer_(method, args) {
-    if (method !== "loginStaff" && !staffSessionToken) {
+    const needsSession = NO_SESSION_METHODS.indexOf(method) === -1;
+    if (needsSession && !staffSessionToken) {
       return Promise.reject(new Error("Sign in to Bakery POS and try again."));
     }
-    const parameters = method === "loginStaff"
+    const parameters = !needsSession
       ? args
       : args.concat([staffSessionToken]);
     return getAccessToken_().then(function(token) {
@@ -343,23 +371,177 @@
     byId("offline-banner").hidden = true;
   }
 
-  async function refreshData(silent) {
-    if (State.loading) return false;
-    State.loading = true;
-    try {
-      State.data = await DataService.getAppData();
-      setConnectionState(!navigator.onLine);
-      renderAll();
-      if (!silent) showNotice("Data refreshed.");
-      await updateQueueStatus();
-      return true;
-    } catch (error) {
-      setConnectionState(true);
-      showNotice(error.message, true);
-      return false;
-    } finally {
-      State.loading = false;
+  function emptyData_() {
+    return {
+      currentUser: null, settings: { default_currency: "USD", tax_rate_basis_points: 0 },
+      products: [], addOns: [], inventoryItems: [], suppliers: [], stock: [],
+      orders: [], openOrders: [], customers: [], staffAccess: [], ordersRange: null, shopToday: ""
+    };
+  }
+
+  function sectionsForPage_(page) {
+    return PAGE_SECTIONS[page] || [];
+  }
+
+  // Merges a server reply from getSections/loginStaff into State and redraws only what changed.
+  function applySections_(reply, requested) {
+    if (!reply) return;
+    if (!State.data) State.data = emptyData_();
+    const userChanged = !State.data.currentUser ||
+      JSON.stringify(State.data.currentUser) !== JSON.stringify(reply.currentUser);
+    State.data.currentUser = reply.currentUser;
+    State.data.settings = reply.settings || State.data.settings;
+    State.data.shopToday = reply.shopToday || State.data.shopToday;
+    const sections = reply.sections || {};
+    const changed = Object.keys(sections);
+    if (sections.catalog) {
+      State.data.products = sections.catalog.products;
+      State.data.addOns = sections.catalog.addOns;
+      State.data.inventoryItems = sections.catalog.inventoryItems;
     }
+    if (sections.orders) {
+      State.data.orders = sections.orders.orders;
+      State.data.openOrders = sections.orders.openOrders;
+      State.data.ordersRange = sections.orders.range;
+    }
+    if (sections.customers) State.data.customers = sections.customers.customers;
+    if (sections.stock) State.data.stock = sections.stock.stock;
+    if (sections.suppliers) State.data.suppliers = sections.suppliers.suppliers;
+    if (sections.staff) State.data.staffAccess = sections.staff.staffAccess;
+    // Sections the user may not see come back empty: mark them done so no spinner waits forever.
+    (requested || []).concat(changed).forEach(function(name) { State.ready[name] = true; });
+    if (userChanged) applyPageAccess_();
+    renderSections_(changed, true);
+    updateLoadingStates_();
+  }
+
+  const SECTION_RENDERERS = {
+    catalog: function() { renderProducts(); renderAddOns(); populateSelects(); renderItemCards(); renderCart(); },
+    orders: function() { renderDashboard(); renderOrders(); },
+    customers: function() {},
+    stock: function() { renderDashboard(); renderStock(); },
+    suppliers: function() { renderSuppliers(); populateSelects(); },
+    staff: function() { renderSettings(); }
+  };
+
+  function renderSections_(names, includeSettings) {
+    if (!State.data) return;
+    const done = {};
+    names.forEach(function(name) {
+      const renderer = SECTION_RENDERERS[name];
+      if (renderer && !done[name]) { done[name] = true; renderer(); }
+    });
+    if (includeSettings) {
+      renderSettings();
+      if (!State.cart.length) {
+        State.orderCurrency = State.data.settings.default_currency || "USD";
+        byId("order-currency").value = State.orderCurrency;
+      }
+      renderOrderTotals();
+    }
+  }
+
+  // Shows a spinner on any page whose data has not arrived yet.
+  function updateLoadingStates_() {
+    document.querySelectorAll(".screen").forEach(function(screen) {
+      const page = screen.id.replace("screen-", "");
+      const waiting = sectionsForPage_(page).some(function(name) { return !State.ready[name]; });
+      screen.classList.toggle("is-loading", waiting);
+    });
+  }
+
+  function addLoadingPlaceholders_() {
+    document.querySelectorAll(".screen").forEach(function(screen) {
+      if (screen.querySelector(".screen-loading")) return;
+      const placeholder = element("div", "screen-loading");
+      placeholder.setAttribute("role", "status");
+      placeholder.append(element("span", "inline-spinner"));
+      placeholder.append(document.createTextNode("Loading…"));
+      const heading = screen.querySelector(".screen-heading");
+      if (heading) heading.after(placeholder); else screen.prepend(placeholder);
+    });
+  }
+
+  // Loads sections one request at a time, in order. Sections already loaded are skipped unless
+  // force is set (refresh).
+  function loadSections_(names, options) {
+    const opts = options || {};
+    const run = async function() {
+      const wanted = names.filter(function(name) {
+        return opts.force || !State.ready[name];
+      });
+      if (!wanted.length) return true;
+      const range = State.data && State.data.ordersRange;
+      const reply = await DataService.getSections(wanted, {
+        fresh: Boolean(opts.fresh),
+        ordersFrom: range ? range.from : "",
+        ordersTo: range ? range.to : ""
+      });
+      applySections_(reply, wanted);
+      return true;
+    };
+    sectionChain = sectionChain.then(run, run);
+    return sectionChain;
+  }
+
+  function loadRemainingSections_() {
+    const rest = ALL_SECTIONS.filter(function(name) { return !State.ready[name]; });
+    if (!rest.length) return Promise.resolve(true);
+    return loadSections_(rest).catch(function(error) {
+      showNotice("Some data could not load: " + error.message + " Tap refresh to try again.", true);
+      ALL_SECTIONS.forEach(function(name) { State.ready[name] = true; });
+      updateLoadingStates_();
+      return false;
+    });
+  }
+
+  // Reloads data: the open page first, everything else quietly afterwards. A refresh asked for
+  // while another one runs is queued, so it is never silently skipped.
+  async function refreshData(silent, options) {
+    const opts = options || {};
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return refreshInFlight;
+    }
+    State.loading = true;
+    refreshInFlight = (async function() {
+      try {
+        const active = sectionsForPage_(State.activeScreen);
+        await loadSections_(active.length ? active : ["catalog"], { force: true, fresh: Boolean(opts.fresh) });
+        lastRefreshAt = Date.now();
+        setConnectionState(!navigator.onLine);
+        const rest = ALL_SECTIONS.filter(function(name) { return active.indexOf(name) === -1; });
+        loadSections_(rest, { force: true }).catch(function(error) {
+          showNotice(error.message, true);
+        });
+        if (!silent) showNotice("Data refreshed.");
+        await updateQueueStatus();
+        return true;
+      } catch (error) {
+        setConnectionState(!navigator.onLine);
+        showNotice(error.message, true);
+        return false;
+      }
+    })();
+    try {
+      return await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+      State.loading = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        refreshData(true);
+      }
+    }
+  }
+
+  // Quiet refresh when the user comes back to the app, only if the Google token is still valid
+  // (a new token needs a tap, which a background refresh cannot do).
+  function refreshOnReturn_() {
+    if (document.visibilityState !== "visible" || !State.data || !State.data.currentUser) return;
+    if (!navigator.onLine || Date.now() - lastRefreshAt < 60000) return;
+    if (!accessToken || Date.now() > accessTokenExpiresAt - 120000) return;
+    refreshData(true);
   }
 
   function showScreen(name) {
@@ -372,29 +554,14 @@
     document.querySelectorAll(".nav-button").forEach(function(button) {
       button.classList.toggle("active", button.dataset.screen === name);
     });
-    if (name === "stock" && State.data) {
+    updateLoadingStates_();
+    const missing = sectionsForPage_(name).filter(function(section) { return !State.ready[section]; });
+    if (missing.length && State.data && State.data.currentUser) {
+      loadSections_(missing).catch(function(error) { showNotice(error.message, true); });
+    }
+    if (name === "stock" && State.data && State.ready.catalog) {
       loadPriceHistory();
     }
-  }
-
-  function renderAll() {
-    if (!State.data) return;
-    applyPageAccess_();
-    renderDashboard();
-    renderOrders();
-    renderProducts();
-    renderAddOns();
-    renderSuppliers();
-    renderStock();
-    renderSettings();
-    populateSelects();
-    if (!State.cart.length) {
-      State.orderCurrency = State.data.settings.default_currency || "USD";
-      byId("order-currency").value = State.orderCurrency;
-    }
-    renderItemCards();
-    renderCart();
-    renderOrderTotals();
   }
 
   function applyPageAccess_() {
@@ -438,12 +605,23 @@
     });
     const lowStock = (State.data.stock || []).filter(function(item) { return item.is_low; });
     text(byId("kpi-low-stock"), String(lowStock.length));
-    const attention = orders.filter(function(order) {
+    const attention = orders.concat(State.data.openOrders || []).filter(function(order) {
       return ["new", "preparing", "ready"].includes(order.status);
+    }).sort(function(left, right) {
+      return String(right.created_at).localeCompare(String(left.created_at));
     }).slice(0, 8);
-    renderSimpleRows(byId("dashboard-orders"), attention.map(function(order) {
-      return order.order_number + " · " + (order.customer_name || "Walk-in") + " · " + order.status;
-    }), "No orders need attention.");
+    const container = byId("dashboard-orders");
+    container.replaceChildren();
+    if (!attention.length) {
+      container.append(element("p", "muted", "No orders need attention."));
+    }
+    attention.forEach(function(order) {
+      const row = element("button", "compact-row clickable",
+        order.order_number + " · " + (order.customer_name || "Walk-in") + " · " + order.status);
+      row.type = "button";
+      row.addEventListener("click", function() { openOrderDetail(order.id); });
+      container.append(row);
+    });
     renderSimpleRows(byId("dashboard-stock"), lowStock.slice(0, 8).map(function(item) {
       return item.name + " · " + formatQuantity(item.on_hand_milli) + " " + item.base_unit;
     }), "No low-stock items.");
@@ -458,19 +636,88 @@
     rows.forEach(function(value) { container.append(element("div", "compact-row", value)); });
   }
 
+  // ---- Orders page ----
+  // OrderView holds what the Orders page shows. By default it is the live startup range
+  // (yesterday + today); a date search replaces it with history results from the server.
+  const OrderView = { range: null, orders: null, totalCount: 0, hasMore: false, live: true };
+
+  function currentViewOrders_() {
+    return OrderView.live ? (State.data.orders || []) : (OrderView.orders || []);
+  }
+
+  function allKnownOrders_() {
+    const seen = {};
+    const list = [];
+    [State.data.orders || [], State.data.openOrders || [], OrderView.orders || []].forEach(function(group) {
+      group.forEach(function(order) {
+        if (!seen[order.id]) { seen[order.id] = true; list.push(order); }
+      });
+    });
+    return list;
+  }
+
+  function findKnownOrder_(orderId) {
+    return allKnownOrders_().find(function(order) { return order.id === orderId; }) || null;
+  }
+
+  // Puts an order returned by the server into every list that shows it, then redraws.
+  function upsertLocalOrder_(order) {
+    if (!order || !order.id || !State.data) return;
+    const replaceIn = function(list) {
+      const index = list.findIndex(function(existing) { return existing.id === order.id; });
+      if (index !== -1) { list[index] = order; return true; }
+      return false;
+    };
+    const inStartup = replaceIn(State.data.orders);
+    replaceIn(State.data.openOrders);
+    if (OrderView.orders) replaceIn(OrderView.orders);
+    if (!inStartup && !State.data.openOrders.some(function(o) { return o.id === order.id; })) {
+      const range = State.data.ordersRange;
+      const day = shopDateOf_(order.created_at);
+      if (!range || (day >= range.from && day <= range.to)) State.data.orders.unshift(order);
+    }
+    renderDashboard();
+    renderOrders();
+    refreshOrderDetail_(order.id);
+  }
+
+  function shopDateOf_(iso) {
+    // Shop time zone is UTC+7 (Cambodia / Bangkok).
+    const date = new Date(new Date(iso).getTime() + 7 * 60 * 60 * 1000);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function shopDateShift_(dateString, days) {
+    const date = new Date(dateString + "T00:00:00Z");
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function shopToday_() {
+    return shopDateOf_(new Date().toISOString());
+  }
+
   function renderOrders() {
     const container = byId("orders-list");
-    if (!container) return;
+    if (!container || !State.data) return;
     container.replaceChildren();
+    const range = OrderView.live ? State.data.ordersRange : OrderView.range;
+    if (range && document.activeElement !== byId("orders-from") && document.activeElement !== byId("orders-to")) {
+      byId("orders-from").value = range.from;
+      byId("orders-to").value = range.to;
+    }
+    renderOpenOrdersStrip_(range);
     const search = (byId("orders-search").value || "").trim().toLowerCase();
     const selectedStatus = byId("orders-status").value;
-    const queued = getQueuedOrderPreviews();
-    const all = (State.data.orders || []).filter(function(order) {
+    const queued = OrderView.live ? getQueuedOrderPreviews() : [];
+    const all = currentViewOrders_().filter(function(order) {
       const searchText = [order.order_number, order.customer_name, order.customer_phone]
         .join(" ").toLowerCase();
       return (!search || searchText.includes(search)) &&
         (!selectedStatus || order.status === selectedStatus);
     }).concat(queued);
+    renderOrdersSummary_(all);
+    byId("orders-more").hidden = OrderView.live || !OrderView.hasMore;
     if (!all.length) {
       container.append(element("p", "muted", "No matching orders."));
       return;
@@ -482,6 +729,191 @@
     });
   }
 
+  function renderOrdersSummary_(orders) {
+    const active = orders.filter(function(order) { return order.status !== "cancelled"; });
+    const totals = { USD: 0, KHR: 0 };
+    active.forEach(function(order) {
+      if (totals[order.currency] !== undefined) totals[order.currency] += Number(order.total_minor || 0);
+    });
+    const parts = [orders.length + " order" + (orders.length === 1 ? "" : "s")];
+    if (totals.USD) parts.push(moneyFromMinor(totals.USD, "USD"));
+    if (totals.KHR) parts.push(moneyFromMinor(totals.KHR, "KHR"));
+    if (!OrderView.live && OrderView.totalCount > (OrderView.orders || []).length) {
+      parts.push("showing " + (OrderView.orders || []).length + " of " + OrderView.totalCount);
+    }
+    text(byId("orders-summary"), parts.join(" · "));
+  }
+
+  // Unfinished orders created before the selected range, so none are forgotten.
+  function renderOpenOrdersStrip_(range) {
+    const strip = byId("open-orders-strip");
+    const list = byId("open-orders-list");
+    const from = range ? range.from : "";
+    const open = allKnownOrders_().filter(function(order) {
+      return ["new", "preparing", "ready"].includes(order.status) &&
+        from && shopDateOf_(order.created_at) < from;
+    }).sort(function(left, right) {
+      return String(left.created_at).localeCompare(String(right.created_at));
+    });
+    strip.hidden = !open.length;
+    list.replaceChildren();
+    if (!open.length) return;
+    text(byId("open-orders-title"), open.length + " open order" + (open.length === 1 ? "" : "s") +
+      " from earlier days");
+    open.forEach(function(order) {
+      const chip = element("button", "open-order-chip");
+      chip.type = "button";
+      chip.append(element("strong", "", order.order_number));
+      chip.append(element("span", "muted", new Date(order.created_at).toLocaleDateString(undefined, {
+        weekday: "short", day: "numeric", month: "short"
+      })));
+      chip.append(element("span", "status status-" + order.status, order.status));
+      chip.append(element("span", "", moneyFromMinor(order.total_minor || 0, order.currency)));
+      chip.setAttribute("aria-label", "Open order " + order.order_number);
+      chip.addEventListener("click", function() { openOrderDetail(order.id); });
+      list.append(chip);
+    });
+  }
+
+  function setQuickRange_(kind) {
+    const today = State.data.shopToday || shopToday_();
+    let from = today;
+    let to = today;
+    if (kind === "startup") {
+      from = shopDateShift_(today, -1);
+    } else if (kind === "week") {
+      from = shopDateShift_(today, -6);
+    } else if (kind === "month") {
+      from = today.slice(0, 8) + "01";
+    } else if (kind === "last-month") {
+      const firstThis = today.slice(0, 8) + "01";
+      to = shopDateShift_(firstThis, -1);
+      from = to.slice(0, 8) + "01";
+    }
+    byId("orders-from").value = from;
+    byId("orders-to").value = to;
+    document.querySelectorAll(".quick-range").forEach(function(button) {
+      button.classList.toggle("active", button.dataset.range === kind);
+    });
+  }
+
+  async function searchOrderRange_(append) {
+    const from = byId("orders-from").value;
+    const to = byId("orders-to").value;
+    if (!from || !to) throw new Error("Choose both dates.");
+    if (to < from) throw new Error("The end date must be on or after the start date.");
+    const startup = State.data.ordersRange;
+    if (!append && startup && from === startup.from && to === startup.to) {
+      OrderView.live = true;
+      OrderView.orders = null;
+      OrderView.range = null;
+      renderOrders();
+      return;
+    }
+    const offset = append ? (OrderView.orders || []).length : 0;
+    const result = await DataService.getOrderHistory({ from: from, to: to, offset: offset });
+    OrderView.live = false;
+    OrderView.range = result.range;
+    OrderView.orders = append ? (OrderView.orders || []).concat(result.orders) : result.orders;
+    OrderView.totalCount = result.total_count;
+    OrderView.hasMore = result.has_more;
+    renderOrders();
+  }
+
+  // ---- Order detail ----
+  let detailOrderId = "";
+
+  function openOrderDetail(orderId) {
+    const order = findKnownOrder_(orderId);
+    if (!order) {
+      showNotice("That order is not loaded. Search its date range on the Orders page.", true);
+      return;
+    }
+    detailOrderId = orderId;
+    renderOrderDetail_(order);
+    const dialog = byId("order-detail-dialog");
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function refreshOrderDetail_(orderId) {
+    if (!detailOrderId || detailOrderId !== orderId || !byId("order-detail-dialog").open) return;
+    const order = findKnownOrder_(orderId);
+    if (order) renderOrderDetail_(order);
+  }
+
+  function renderOrderDetail_(order) {
+    text(byId("order-detail-title"), "Order " + (order.order_number || ""));
+    const body = byId("order-detail-body");
+    body.replaceChildren();
+    body.append(renderOrderCard(order));
+    let details = {};
+    try { details = JSON.parse(order.custom_details_json || "{}"); } catch (error) { details = {}; }
+    const detailKeys = Object.keys(details).filter(function(key) { return details[key]; });
+    if (detailKeys.length || order.notes) {
+      const extra = element("div", "panel");
+      extra.append(element("h3", "", "Details"));
+      if (order.notes) extra.append(element("p", "", "Notes: " + order.notes));
+      detailKeys.forEach(function(key) {
+        extra.append(element("p", "", key.replaceAll("_", " ") + ": " + details[key]));
+      });
+      body.append(extra);
+    }
+    const history = order.status_history || [];
+    if (history.length) {
+      body.append(element("h3", "", "Status history"));
+      const list = element("ul", "order-history-list");
+      history.forEach(function(entry) {
+        list.append(element("li", "", new Date(entry.changed_at).toLocaleString() + " · " + entry.status));
+      });
+      body.append(list);
+    }
+    if ((order.payments || []).length) {
+      body.append(element("h3", "", "Payments"));
+      const list = element("ul", "order-history-list");
+      order.payments.forEach(function(payment) {
+        list.append(element("li", "", new Date(payment.paid_at || payment.created_at).toLocaleString() +
+          " · " + moneyFromMinor(payment.amount_minor, payment.currency) + " · " +
+          String(payment.method || "").replaceAll("_", " ")));
+      });
+      body.append(list);
+    }
+  }
+
+  // Changes an order's status: the screen updates at once, the server confirms in the background,
+  // and the change is undone with an error message if the server refuses it.
+  const pendingOrderSaves = {};
+
+  async function changeOrderStatus_(order, next, button, busyLabel, doneMessage) {
+    if (pendingOrderSaves[order.id]) return;
+    const previous = order.status;
+    const optimistic = Object.assign({}, order, { status: next });
+    setButtonBusy_(button, busyLabel);
+    pendingOrderSaves[order.id] = busyLabel;
+    upsertLocalOrder_(optimistic);
+    try {
+      const saved = await DataService.updateOrderStatus(order.id, next);
+      if (saved && saved.queued) {
+        showNotice("Saved on this device; it will sync when online.");
+        return;
+      }
+      upsertLocalOrder_(saved);
+      if (next === "cancelled") loadSections_(["stock"], { force: true }).catch(function() {});
+      showNotice(doneMessage);
+    } catch (error) {
+      delete pendingOrderSaves[order.id];
+      upsertLocalOrder_(Object.assign({}, order, { status: previous }));
+      showNotice(error.message, true);
+    } finally {
+      clearButtonBusy_(button);
+      if (pendingOrderSaves[order.id]) {
+        delete pendingOrderSaves[order.id];
+        renderOrders();
+        renderDashboard();
+        refreshOrderDetail_(order.id);
+      }
+    }
+  }
+
   function renderOrderCard(order) {
     const card = element("article", "order-card");
     const heading = element("div", "order-heading");
@@ -490,7 +922,8 @@
     card.append(heading);
     card.append(element("p", "order-meta",
       (order.order_number || "Pending sync") + " · " + order.order_channel + " · " + order.fulfillment_method +
-      (order.pickup_at ? " · " + new Date(order.pickup_at).toLocaleString() : "") +
+      (order.created_at ? " · " + new Date(order.created_at).toLocaleString() : "") +
+      (order.pickup_at ? " · pickup " + new Date(order.pickup_at).toLocaleString() : "") +
       (order.location ? " · " + order.location : "")));
     const list = element("ul", "order-items");
     (order.items || []).forEach(function(item) {
@@ -500,10 +933,15 @@
     card.append(element("p", "order-total",
       moneyFromMinor(order.total_minor || 0, order.currency) +
       " · paid " + moneyFromMinor(order.amount_paid_minor || 0, order.currency) +
-      " · due " + moneyFromMinor(order.balance_due_minor || order.total_minor || 0, order.currency)));
+      " · due " + moneyFromMinor(order.balance_due_minor === undefined
+        ? order.total_minor || 0 : order.balance_due_minor, order.currency)));
     const actions = element("div", "order-actions");
     if (order.request_id) {
       actions.append(element("span", "muted", "Waiting to sync"));
+    } else if (pendingOrderSaves[order.id]) {
+      const saving = element("span", "muted saving-indicator");
+      saving.append(element("span", "inline-spinner"), document.createTextNode(" " + pendingOrderSaves[order.id]));
+      actions.append(saving);
     } else {
       const next = { new: "preparing", preparing: "ready", ready: "completed" }[order.status];
       if (next) {
@@ -511,11 +949,7 @@
         const statusButton = element("button", "", label);
         statusButton.type = "button";
         statusButton.addEventListener("click", function() {
-          runAction(async function() {
-            await DataService.updateOrderStatus(order.id, next);
-            await refreshData(true);
-            showNotice("Order status updated.");
-          });
+          changeOrderStatus_(order, next, statusButton, "Saving…", "Order status updated.");
         });
         actions.append(statusButton);
       }
@@ -528,11 +962,7 @@
         cancel.type = "button";
         cancel.addEventListener("click", function() {
           if (window.confirm("Cancel this order? It will remain in history.")) {
-            runAction(async function() {
-              await DataService.updateOrderStatus(order.id, "cancelled");
-              await refreshData(true);
-              showNotice("Order cancelled.");
-            });
+            changeOrderStatus_(order, "cancelled", cancel, "Cancelling…", "Order cancelled.");
           }
         });
         actions.append(cancel);
@@ -540,6 +970,34 @@
     }
     card.append(actions);
     return card;
+  }
+
+  // ---- Busy buttons: every button that waits for the server shows a spinner ----
+  function setButtonBusy_(button, label) {
+    if (!button || button.getAttribute("aria-busy") === "true") return;
+    button.dataset.idleContent = button.innerHTML;
+    button.style.minWidth = button.offsetWidth ? button.offsetWidth + "px" : "";
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.replaceChildren(element("span", "button-spinner"), element("span", "", label || "Working…"));
+    button.firstChild.setAttribute("aria-hidden", "true");
+  }
+
+  function clearButtonBusy_(button) {
+    if (!button || button.getAttribute("aria-busy") !== "true") return;
+    button.innerHTML = button.dataset.idleContent || "";
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.style.minWidth = "";
+  }
+
+  async function withBusyButton_(button, label, work) {
+    setButtonBusy_(button, label);
+    try {
+      return await work();
+    } finally {
+      clearButtonBusy_(button);
+    }
   }
 
   function getQueuedOrderPreviews() {
@@ -647,13 +1105,6 @@
     byId("settings-form").hidden = !isAdmin;
     byId("staff-access-section").hidden = !isAdmin;
     if (isAdmin) renderStaffAccess_(State.data.staffAccess || []);
-    const backup = (State.data.backup || [])[0];
-    text(byId("backup-last-run"), backup
-      ? "Last backup: " + backup.created_at + " · " + backup.status + (backup.file_name ? " · " + backup.file_name : "")
-      : "No backup has completed yet.");
-    renderSimpleRows(byId("backup-log"), (State.data.backup || []).slice(0, 5).map(function(record) {
-      return record.created_at + " · " + record.status + (record.file_name ? " · " + record.file_name : "");
-    }), "Backup history will appear here.");
   }
 
   function renderStaffAccess_(records) {
@@ -943,12 +1394,13 @@
 
     container.hidden = false;
     byId("use-customer-match").hidden = true;
-    text(byId("customer-match-detail"), "Checking previous orders for this phone…");
+    const localMatch = findCachedCustomerByPhone(phoneKey);
+    text(byId("customer-match-detail"), localMatch ? "" : "Checking previous orders for this phone…");
     customerLookupTimer = window.setTimeout(async function() {
       try {
-        const customer = navigator.onLine
+        const customer = localMatch || (navigator.onLine && !State.ready.customers
           ? await DataService.findCustomerByPhone(phone)
-          : findCachedCustomerByPhone(phoneKey);
+          : null);
         if (sequence !== customerLookupSequence ||
             phoneMatchKey(byId("order-form").elements.customer_phone.value) !== phoneKey) return;
         matchedCustomer = customer;
@@ -971,25 +1423,32 @@
         text(byId("customer-match-detail"), "Customer lookup failed: " + error.message);
         showNotice("Customer lookup failed: " + error.message, true);
       }
-    }, 250);
+    }, localMatch ? 0 : 250);
   }
 
+  // Looks the phone up in the customer list loaded with the app (no server call).
   function findCachedCustomerByPhone(phoneKey) {
-    const matches = (State.data.orders || []).filter(function(order) {
-      return phoneMatchKey(order.customer_phone) === phoneKey;
-    }).sort(function(left, right) {
-      return String(right.created_at).localeCompare(String(left.created_at));
-    });
-    if (!matches.length) return null;
-    const namedOrder = matches.find(function(order) { return Boolean(order.customer_name); }) || matches[0];
-    const locatedOrder = matches.find(function(order) { return Boolean(order.location); }) || matches[0];
-    return {
-      customer_name: namedOrder.customer_name || "",
-      customer_phone: matches[0].customer_phone,
-      location: locatedOrder.location || "",
-      order_count: matches.length,
-      last_order_at: matches[0].created_at
-    };
+    if (!State.data) return null;
+    return (State.data.customers || []).find(function(entry) {
+      return entry.phone_key === phoneKey;
+    }) || null;
+  }
+
+  // Keeps the customer list current after a new order, without reloading it.
+  function rememberCustomer_(order) {
+    const key = phoneMatchKey(order.customer_phone);
+    if (key.length < 5 || !State.data) return;
+    const list = State.data.customers || (State.data.customers = []);
+    let entry = list.find(function(item) { return item.phone_key === key; });
+    if (!entry) {
+      entry = { phone_key: key, customer_name: "", customer_phone: order.customer_phone, location: "", order_count: 0, last_order_at: "" };
+      list.push(entry);
+    }
+    entry.order_count += 1;
+    entry.last_order_at = order.created_at || new Date().toISOString();
+    entry.customer_phone = order.customer_phone;
+    if (order.customer_name) entry.customer_name = order.customer_name;
+    if (order.location) entry.location = order.location;
   }
 
   function clearCustomerMatch() {
@@ -1106,7 +1565,16 @@
     clearCustomerMatch();
     renderItemCards();
     renderCart();
-    refreshData(true);
+    if (!result.queued) {
+      upsertLocalOrder_(result);
+      rememberCustomer_(result);
+      if ((result.items || []).some(function(item) { return item.inventory_item_id; })) {
+        loadSections_(["stock"], { force: true }).catch(function() {});
+      }
+    } else {
+      rememberCustomer_(preview);
+      updateQueueStatus();
+    }
     showNotice(result.queued ? "Order queued on this device. It is not yet shared with other devices." : "Order saved.");
     showReceipt(receipt);
   }
@@ -1199,7 +1667,7 @@
         tableContainer.append(element("p", "muted", "No recorded quotes or purchases for this item."));
         return;
       }
-      const unit = (State.data.inventoryItems.find(function(item) { return item.id === itemId; }) || {}).base_unit || "";
+      const unit = ((State.data.inventoryItems || []).find(function(item) { return item.id === itemId; }) || {}).base_unit || "";
       const table = createTable(["Date", "Type", "Supplier", "Quantity", "Total cost", "Unit cost", "Currency"]);
       history.forEach(function(entry) {
         const row = table.tBodies[0].insertRow();
@@ -1316,10 +1784,11 @@
       button.addEventListener("click", function() { showScreen(button.dataset.screen); });
     });
     byId("refresh-button").addEventListener("click", function() {
-      runAction(async function() {
+      const button = byId("refresh-button");
+      withBusyButton_(button, "", async function() {
         await DataService.flushPendingActions();
-        await refreshData(false);
-      });
+        await refreshData(false, { fresh: true });
+      }).catch(function(error) { showNotice(error.message, true); });
     });
     byId("line-type").addEventListener("change", renderItemCards);
     byId("order-form").elements.customer_phone.addEventListener("input", scheduleCustomerLookup);
@@ -1374,12 +1843,42 @@
     });
     byId("orders-search").addEventListener("input", renderOrders);
     byId("orders-status").addEventListener("change", renderOrders);
+    byId("orders-range-form").addEventListener("submit", function(event) {
+      event.preventDefault();
+      runAction(function() { return searchOrderRange_(false); }, event.currentTarget, "Searching…");
+    });
+    document.querySelectorAll(".quick-range").forEach(function(button) {
+      button.addEventListener("click", function() {
+        setQuickRange_(button.dataset.range);
+        runAction(function() { return searchOrderRange_(false); }, byId("orders-range-form"), "Searching…");
+      });
+    });
+    ["orders-from", "orders-to"].forEach(function(id) {
+      byId(id).addEventListener("change", function() {
+        document.querySelectorAll(".quick-range").forEach(function(button) { button.classList.remove("active"); });
+      });
+    });
+    byId("orders-more").addEventListener("click", function() {
+      withBusyButton_(byId("orders-more"), "Loading…", function() {
+        return searchOrderRange_(true);
+      }).catch(function(error) { showNotice(error.message, true); });
+    });
+    byId("open-orders-toggle").addEventListener("click", function() {
+      const list = byId("open-orders-list");
+      list.hidden = !list.hidden;
+      byId("open-orders-toggle").textContent = list.hidden ? "Show" : "Hide";
+      byId("open-orders-toggle").setAttribute("aria-expanded", String(!list.hidden));
+    });
+    byId("order-detail-close").addEventListener("click", function() {
+      byId("order-detail-dialog").close();
+    });
+    byId("order-detail-dialog").addEventListener("close", function() { detailOrderId = ""; });
     byId("product-form").addEventListener("submit", function(event) {
       event.preventDefault();
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.createProduct({
+        const saved = await DataService.createProduct({
           name: values.get("name"),
           category: values.get("category"),
           size: values.get("size"),
@@ -1388,7 +1887,7 @@
           inventory_item_id: values.get("inventory_item_id")
         });
         form.reset();
-        refreshData(true);
+        if (saved && !saved.queued) { State.data.products.push(saved); SECTION_RENDERERS.catalog(); }
         showNotice("Product saved.");
       }, form, "Saving product…");
     });
@@ -1397,14 +1896,14 @@
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.createAddOn({
+        const saved = await DataService.createAddOn({
           name: values.get("name"),
           price_usd: values.get("price_usd"),
           price_khr: values.get("price_khr"),
           inventory_item_id: values.get("inventory_item_id")
         });
         form.reset();
-        refreshData(true);
+        if (saved && !saved.queued) { State.data.addOns.push(saved); SECTION_RENDERERS.catalog(); }
         showNotice("Add-on saved.");
       }, form, "Saving add-on…");
     });
@@ -1413,12 +1912,12 @@
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.createSupplier({
+        const saved = await DataService.createSupplier({
           name: values.get("name"), phone: values.get("phone"),
           email: values.get("email"), notes: values.get("notes")
         });
         form.reset();
-        refreshData(true);
+        if (saved && !saved.queued) { State.data.suppliers.push(saved); SECTION_RENDERERS.suppliers(); }
         showNotice("Supplier saved.");
       }, form, "Saving supplier…");
     });
@@ -1427,13 +1926,14 @@
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.createInventoryItem({
+        const saved = await DataService.createInventoryItem({
           name: values.get("name"), category: values.get("category"),
           base_unit: values.get("base_unit"),
           low_stock_threshold: values.get("low_stock_threshold")
         });
         form.reset();
-        refreshData(true);
+        if (saved && !saved.queued) { State.data.inventoryItems.push(saved); SECTION_RENDERERS.catalog(); }
+        loadSections_(["stock"], { force: true }).catch(function() {});
         showNotice("Stock item saved.");
       }, form, "Saving stock item…");
     });
@@ -1453,7 +1953,7 @@
           }]
         });
         form.reset();
-        refreshData(true);
+        await loadSections_(["stock"], { force: true });
         showNotice("Stock receipt saved.");
       }, form, "Posting stock receipt…");
     });
@@ -1473,7 +1973,7 @@
           notes: ""
         });
         form.reset();
-        refreshData(true).then(loadPriceHistory);
+        loadPriceHistory();
         showNotice("Supplier price quote saved.");
       }, form, "Posting supplier quote…");
     });
@@ -1490,12 +1990,17 @@
           notes: values.get("notes")
         });
         form.reset();
-        refreshData(true);
+        await loadSections_(["stock"], { force: true });
         showNotice("Stock adjustment saved.");
       }, form, "Saving adjustment…");
     });
     byId("price-history-item").addEventListener("change", loadPriceHistory);
-    byId("stock-refresh").addEventListener("click", function() { refreshData(false); });
+    byId("stock-refresh").addEventListener("click", function() {
+      withBusyButton_(byId("stock-refresh"), "", function() {
+        return loadSections_(["stock"], { force: true });
+      }).then(function() { showNotice("Stock refreshed."); })
+        .catch(function(error) { showNotice(error.message, true); });
+    });
     byId("report-form").addEventListener("submit", function(event) {
       event.preventDefault();
       const form = event.currentTarget;
@@ -1514,11 +2019,14 @@
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.updateSettings({
+        const settings = await DataService.updateSettings({
           default_currency: values.get("default_currency"),
           tax_rate_basis_points: values.get("tax_rate_basis_points")
         });
-        refreshData(true);
+        if (settings && !settings.queued) {
+          State.data.settings = settings;
+          renderSections_([], true);
+        }
         showNotice("Settings saved.");
       }, form, "Saving settings…");
     });
@@ -1530,12 +2038,12 @@
       const form = event.currentTarget;
       runAction(async function() {
         const values = new FormData(form);
-        await DataService.recordPayment(values.get("order_id"), {
+        const saved = await DataService.recordPayment(values.get("order_id"), {
           amount: values.get("amount"),
           method: values.get("method")
         });
         byId("payment-dialog").close();
-        refreshData(true);
+        if (saved && !saved.queued) upsertLocalOrder_(saved);
         showNotice("Payment recorded.");
       }, form, "Posting payment…");
     });
@@ -1564,7 +2072,7 @@
         form.elements.active.checked = true;
         form.elements.role.value = "cashier";
         updateStaffPageControls_();
-        refreshData(true);
+        await loadSections_(["staff"], { force: true });
         showNotice("Staff access saved.");
       }, form, "Saving staff access…");
     });
@@ -1583,7 +2091,7 @@
       }
       setConnectionState(false);
       DataService.flushPendingActions()
-        .then(function() { refreshData(true); })
+        .then(function() { lastRefreshAt = 0; refreshData(true); })
         .catch(function(error) {
           showNotice("Offline queue unavailable: " + error.message, true);
         });
@@ -1638,25 +2146,44 @@
     });
   }
 
+  function landingSections_() {
+    return { sections: sectionsForPage_(State.activeScreen || "dashboard") };
+  }
+
   async function signIn_() {
     const button = byId("sign-in-button");
     const error = byId("sign-in-error");
-    button.disabled = true;
+    setButtonBusy_(button, "Connecting…");
     error.hidden = true;
-    text(button, "Connecting…");
     try {
       await getAccessToken_();
+      let authConfig = null;
+      try {
+        authConfig = await DataService.getAuthConfig(landingSections_());
+      } catch (configError) {
+        // Older API deployments have no getAuthConfig: fall back to the staff sign-in form.
+        authConfig = null;
+      }
+      clearButtonBusy_(button);
       button.hidden = true;
-      byId("staff-login-form").hidden = false;
       byId("change-google-account").hidden = false;
+      staffLoginDisabled = Boolean(authConfig && authConfig.staffLoginEnabled === false);
+      if (staffLoginDisabled) {
+        staffSessionToken = STAFF_LOGIN_DISABLED_TOKEN;
+        await enterApp_(authConfig.startup);
+        return;
+      }
+      byId("staff-login-form").hidden = false;
       byId("staff-login-form").elements.username.focus();
       setSignedOutStatus_();
     } catch (loginError) {
+      staffSessionToken = "";
+      clearButtonBusy_(button);
+      if (staffLoginDisabled) button.hidden = false;
       error.hidden = false;
       text(error, loginError.message);
     } finally {
-      button.disabled = false;
-      if (!button.hidden) text(button, "Connect shop Google account");
+      clearButtonBusy_(button);
     }
   }
 
@@ -1665,41 +2192,59 @@
     const form = event.currentTarget;
     const button = form.querySelector('button[type="submit"]');
     const error = byId("sign-in-error");
-    button.disabled = true;
+    setButtonBusy_(button, "Signing in…");
     error.hidden = true;
-    text(button, "Signing in…");
     try {
       const values = new FormData(form);
-      const session = await DataService.loginStaff(values.get("username"), values.get("password"));
+      const session = await DataService.loginStaff(
+        values.get("username"), values.get("password"), landingSections_()
+      );
       staffSessionToken = session.sessionToken;
-      const connected = await refreshData(true);
-      if (!connected) {
-        staffSessionToken = "";
-        throw new Error(byId("notice").textContent || "Unable to load Bakery POS data.");
-      }
       form.elements.password.value = "";
-      byId("sign-in-panel").hidden = true;
-      byId("app-shell").hidden = false;
-      byId("refresh-button").hidden = false;
-      byId("switch-account-button").hidden = false;
-      try {
-        await DataService.flushPendingActions();
-      } catch (queueError) {
-        showNotice("Could not sync pending actions: " + queueError.message, true);
-      }
-      if (!refreshTimer) {
-        refreshTimer = window.setInterval(function() {
-          if (navigator.onLine && !State.loading && State.data) refreshData(true);
-        }, 30000);
-      }
+      await enterApp_(session.startup);
     } catch (loginError) {
       staffSessionToken = "";
       error.hidden = false;
       text(error, loginError.message);
     } finally {
-      button.disabled = false;
-      text(button, "Sign in");
+      clearButtonBusy_(button);
     }
+  }
+
+  // Opens the app straight away on the landing page. Its data normally arrives with the sign-in
+  // reply; anything missing shows a spinner and loads in the background.
+  async function enterApp_(startup) {
+    State.data = emptyData_();
+    State.ready = {};
+    OrderView.live = true;
+    OrderView.orders = null;
+    const landing = sectionsForPage_(State.activeScreen);
+    if (startup && !startup.error && startup.currentUser) {
+      applySections_(startup, landing);
+    } else {
+      try {
+        await loadSections_(landing.length ? landing : ["catalog"]);
+      } catch (loadError) {
+        staffSessionToken = "";
+        State.data = null;
+        throw loadError;
+      }
+    }
+    lastRefreshAt = Date.now();
+    byId("sign-in-panel").hidden = true;
+    byId("app-shell").hidden = false;
+    byId("refresh-button").hidden = false;
+    byId("switch-account-button").hidden = false;
+    setConnectionState(!navigator.onLine);
+    applyPageAccess_();
+    showScreen(State.activeScreen);
+    renderSections_([], true);
+    loadRemainingSections_();
+    DataService.flushPendingActions()
+      .catch(function(queueError) {
+        showNotice("Could not sync pending actions: " + queueError.message, true);
+      })
+      .then(updateQueueStatus);
   }
 
   async function switchAccount_() {
@@ -1713,14 +2258,15 @@
     }
     staffSessionToken = "";
     State.data = null;
+    State.ready = {};
     State.cart = [];
     byId("app-shell").hidden = true;
     byId("sign-in-panel").hidden = false;
     byId("refresh-button").hidden = true;
     byId("switch-account-button").hidden = true;
     byId("user-label").hidden = true;
-    byId("staff-login-form").hidden = !accessToken;
-    byId("sign-in-button").hidden = Boolean(accessToken);
+    byId("staff-login-form").hidden = !accessToken || staffLoginDisabled;
+    byId("sign-in-button").hidden = Boolean(accessToken) && !staffLoginDisabled;
     byId("change-google-account").hidden = !accessToken;
     byId("staff-login-form").elements.password.value = "";
     setSignedOutStatus_();
@@ -1745,7 +2291,10 @@
   }
 
   async function startApp() {
+    addLoadingPlaceholders_();
     bindForms();
+    document.addEventListener("visibilitychange", refreshOnReturn_);
+    window.addEventListener("focus", refreshOnReturn_);
     bindCurrencyPrecision();
     byId("sign-in-button").addEventListener("click", signIn_);
     byId("staff-login-form").addEventListener("submit", signInStaff_);

@@ -6,6 +6,9 @@ function getReports(payload, sessionToken) {
   if ((from && isNaN(from.getTime())) || (to && isNaN(to.getTime()))) {
     throw new Error("Report date range is invalid.");
   }
+  preloadTables_(actor.role === "admin"
+    ? ["Orders", "StockMovements", "AuditLog", "InventoryItems", "StockLevels"]
+    : ["Orders", "StockMovements", "InventoryItems", "StockLevels"]);
   const orders = readTable_("Orders").filter(function(order) {
     const created = new Date(order.created_at).getTime();
     return (!from || created >= from.getTime()) &&

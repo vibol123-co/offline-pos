@@ -379,4 +379,38 @@
     .receipt-modal-actions { display: none !important; }
     .receipt-sheet { max-width: 760px; margin: 0 auto; }
   }
+
+  /* ---- Loading states ---- */
+  .screen-loading { display: none; align-items: center; gap: 10px; padding: 28px 4px; color: var(--muted); }
+  .screen.is-loading > .screen-loading { display: flex; }
+  .screen.is-loading > :not(.screen-heading):not(.screen-loading) { display: none !important; }
+  button[aria-busy="true"] { cursor: progress; opacity: .85; }
+
+  /* ---- Orders page: open orders strip, date range ---- */
+  .open-orders-strip { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #f0d9a8; border-radius: 8px; background: #fdf4e3; }
+  .open-orders-heading { display: flex; align-items: center; gap: 10px; color: #7a4e0b; }
+  .open-orders-heading .link-button { margin-left: auto; }
+  .link-button { min-height: 0; padding: 0; border: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; }
+  .open-orders-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .open-orders-list[hidden] { display: none; }
+  .open-order-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: #fff; color: var(--ink); font-size: .92rem; cursor: pointer; }
+  .open-order-chip:hover { border-color: var(--brand); }
+  .open-order-chip .muted { font-size: .85rem; }
+  .orders-range { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 0 0 12px; }
+  .orders-range label { display: flex; flex-direction: column; gap: 4px; font-size: .88rem; color: var(--muted); }
+  .quick-ranges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .quick-range { min-height: 36px; padding: 6px 10px; font-size: .88rem; }
+  .quick-range.active { outline: 2px solid var(--brand); }
+  .orders-summary { margin: 6px 0 10px; }
+  .orders-more { display: flex; justify-content: center; margin: 12px 0; }
+  .compact-row.clickable { cursor: pointer; }
+  .compact-row.clickable:hover { border-color: var(--brand); }
+
+  /* ---- Order detail ---- */
+  .order-detail-dialog { width: min(640px, calc(100vw - 24px)); border: 0; border-radius: 10px; padding: 18px; }
+  .order-detail-dialog::backdrop { background: rgba(0, 0, 0, .35); }
+  .order-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .order-detail-top h2 { margin: 0; }
+  .order-history-list { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: .92rem; }
+  .saving-indicator { display: inline-flex; align-items: center; gap: 8px; }
 </style>

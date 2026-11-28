@@ -28,9 +28,48 @@ function requireShopGoogleAccount_() {
   }
 }
 
-function loginStaff(username, password) {
+// Temporary switch for testing. Set Script Property STAFF_LOGIN_ENABLED = false to skip the
+// POS username/password layer; delete it (or set it to true) to turn staff sign-in back on.
+// The shop Google account check (layer 1) always stays on.
+const STAFF_LOGIN_DISABLED_USER_ = Object.freeze({
+  id: "staff-login-disabled",
+  username: "shop",
+  display_name: "Shop account (staff sign-in off)",
+  role: "admin"
+});
+
+function isStaffLoginEnabled_() {
+  const value = PropertiesService.getScriptProperties().getProperty("STAFF_LOGIN_ENABLED");
+  return String(value || "").trim().toLowerCase() !== "false";
+}
+
+// options.sections: when staff sign-in is off, the startup data comes back in the same call.
+function getAuthConfig(options) {
+  requireShopGoogleAccount_();
+  const enabled = isStaffLoginEnabled_();
+  const result = { staffLoginEnabled: enabled };
+  if (!enabled && options && Array.isArray(options.sections)) {
+    result.startup = safeStartup_(getCurrentStaff_(""), options);
+  }
+  return result;
+}
+
+// Startup data is a bonus on sign-in: if it fails, sign-in still succeeds and the website
+// loads the data with a normal call instead.
+function safeStartup_(staff, options) {
+  try {
+    ensureSchema_();
+    return buildSections_(staff, options.sections, options);
+  } catch (error) {
+    return { error: String(error.message || error) };
+  }
+}
+
+// options.sections: the sections for the landing page, returned with the session in one call.
+function loginStaff(username, password, options) {
   requireShopGoogleAccount_();
   ensureSchema_();
+  forgetSharedTable_("StaffAccess");
   const normalizedUsername = normalizeUsername_(username);
   const passwordText = typeof password === "string" ? password : "";
   const staff = readTable_("StaffAccess").find(function(record) {
@@ -55,7 +94,11 @@ function loginStaff(username, password) {
     }),
     STAFF_SESSION_TTL_SECONDS_
   );
-  return { sessionToken: sessionToken };
+  const result = { sessionToken: sessionToken };
+  if (options && Array.isArray(options.sections)) {
+    result.startup = safeStartup_(staffProfile_(staff), options);
+  }
+  return result;
 }
 
 function logoutStaff(sessionToken) {
@@ -67,6 +110,15 @@ function logoutStaff(sessionToken) {
 
 function getCurrentStaff_(sessionToken) {
   requireShopGoogleAccount_();
+  if (!isStaffLoginEnabled_()) {
+    return {
+      id: STAFF_LOGIN_DISABLED_USER_.id,
+      username: STAFF_LOGIN_DISABLED_USER_.username,
+      display_name: STAFF_LOGIN_DISABLED_USER_.display_name,
+      role: STAFF_LOGIN_DISABLED_USER_.role,
+      allowed_pages: ALL_PAGE_KEYS_.slice()
+    };
+  }
   if (typeof sessionToken !== "string" || !sessionToken) {
     throw new Error("Sign in to Bakery POS and try again.");
   }
@@ -80,14 +132,15 @@ function getCurrentStaff_(sessionToken) {
   } catch (error) {
     throw new Error("Your POS session is invalid. Sign in again.");
   }
-  const staff = readTable_("StaffAccess").find(function(record) {
-    return record.id === session.staff_id;
-  });
+  const staff = findById_("StaffAccess", session.staff_id);
   if (!staff || !isEnabled_(staff.active) ||
       Number(staff.session_version || 0) !== Number(session.session_version || 0)) {
     throw new Error("Your POS account changed or was disabled. Sign in again.");
   }
+  return staffProfile_(staff);
+}
 
+function staffProfile_(staff) {
   let allowedPages;
   try {
     allowedPages = JSON.parse(staff.allowed_pages_json || "[]");
@@ -129,6 +182,10 @@ function requireAdmin_(sessionToken) {
 
 function listStaffAccess(sessionToken) {
   requireAdmin_(sessionToken);
+  return listStaffAccessRecords_();
+}
+
+function listStaffAccessRecords_() {
   return readTable_("StaffAccess").map(function(record) {
     let pages = [];
     try {
@@ -151,6 +208,8 @@ function listStaffAccess(sessionToken) {
 function updateStaffAccess(payload, requestId, sessionToken) {
   const actor = requireAdmin_(sessionToken);
   return runIdempotent_(requestId, "updateStaffAccess", function() {
+    forgetSharedTable_("StaffAccess");
+    delete tableMemo_.StaffAccess;
     const records = readTable_("StaffAccess");
     const existing = payload.id
       ? records.find(function(record) { return String(record.id) === String(payload.id); })

@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
   <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <base target="_top">
     <?!= include("Styles"); ?>
   </head>
@@ -42,7 +44,7 @@
         <button class="nav-button" data-screen="suppliers">Suppliers</button>
         <button class="nav-button" data-screen="stock">Stock & price history</button>
         <button class="nav-button" data-screen="reports">Reports</button>
-        <button class="nav-button" data-screen="settings">Settings & backup</button>
+        <button class="nav-button" data-screen="settings">Settings</button>
       </nav>
 
       <div id="notice" class="notice" role="status" aria-live="polite"></div>
@@ -214,6 +216,25 @@
 
       <section id="screen-orders" class="screen" hidden>
         <div class="screen-heading"><div><p class="eyebrow">Fulfillment</p><h2>Orders</h2></div></div>
+        <section id="open-orders-strip" class="open-orders-strip" hidden aria-label="Open orders from earlier days">
+          <div class="open-orders-heading">
+            <strong id="open-orders-title">Open orders from earlier days</strong>
+            <button id="open-orders-toggle" class="link-button" type="button" aria-expanded="true">Hide</button>
+          </div>
+          <div id="open-orders-list" class="open-orders-list"></div>
+        </section>
+        <form id="orders-range-form" class="orders-range">
+          <label>From<input id="orders-from" name="from" type="date" required></label>
+          <label>To<input id="orders-to" name="to" type="date" required></label>
+          <div class="quick-ranges" role="group" aria-label="Quick date ranges">
+            <button class="button-muted quick-range" type="button" data-range="today">Today</button>
+            <button class="button-muted quick-range" type="button" data-range="startup">Yesterday + today</button>
+            <button class="button-muted quick-range" type="button" data-range="week">Last 7 days</button>
+            <button class="button-muted quick-range" type="button" data-range="month">This month</button>
+            <button class="button-muted quick-range" type="button" data-range="last-month">Last month</button>
+          </div>
+          <button class="button" type="submit">Search</button>
+        </form>
         <div class="filter-row">
           <input id="orders-search" placeholder="Search customer or order number">
           <select id="orders-status">
@@ -223,7 +244,9 @@
             <option value="cancelled">Cancelled</option>
           </select>
         </div>
+        <p id="orders-summary" class="muted orders-summary"></p>
         <div id="orders-list" class="orders-list"></div>
+        <div class="orders-more"><button id="orders-more" class="button button-muted" type="button" hidden>Show more</button></div>
       </section>
 
       <section id="screen-products" class="screen" hidden>
@@ -353,7 +376,7 @@
       </section>
 
       <section id="screen-settings" class="screen" hidden>
-        <div class="screen-heading"><div><p class="eyebrow">Configuration</p><h2>Settings & backup</h2></div></div>
+        <div class="screen-heading"><div><p class="eyebrow">Configuration</p><h2>Settings</h2></div></div>
         <div class="content-grid">
           <form id="settings-form" class="panel form-grid">
             <h3 class="span-all">Shop settings</h3>
@@ -363,10 +386,9 @@
             <div class="span-all"><button class="button" type="submit">Save settings</button></div>
           </form>
           <article class="panel">
-            <h3>Daily Google Drive backup</h3>
-            <p>A dated copy of the full spreadsheet is saved in the restricted Bakery POS Backups folder every day.</p>
-            <p id="backup-last-run" class="muted">Loading backup status…</p>
-            <div id="backup-log" class="compact-list"></div>
+            <h3>Backup</h3>
+            <p>Google Sheets keeps the history of the POS spreadsheet automatically. To restore an earlier state, open the sheet and use File → Version history.</p>
+            <p class="muted">Tip: once a month, use File → Version history → Name current version, so that version is kept permanently.</p>
           </article>
         </div>
         <section id="staff-access-section" class="panel staff-access-section" hidden>
@@ -402,6 +424,13 @@
         </section>
       </section>
     </main>
+    <dialog id="order-detail-dialog" class="order-detail-dialog" aria-labelledby="order-detail-title">
+      <div class="order-detail-top">
+        <h2 id="order-detail-title">Order details</h2>
+        <button id="order-detail-close" class="button button-muted" type="button">Close</button>
+      </div>
+      <div id="order-detail-body"></div>
+    </dialog>
     <dialog id="payment-dialog" class="payment-dialog">
       <form id="payment-form" class="form-grid">
         <h2 class="span-all">Record payment</h2>

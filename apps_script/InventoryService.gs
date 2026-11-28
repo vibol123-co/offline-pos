@@ -12,7 +12,7 @@ function createSupplier(payload, requestId, sessionToken) {
       created_at: now,
       updated_at: now
     };
-    upsertRows_("Suppliers", [supplier]);
+    appendRows_("Suppliers", [supplier]);
     return supplier;
   }, actor);
 }
@@ -38,7 +38,7 @@ function createInventoryItem(payload, requestId, sessionToken) {
       created_at: now,
       updated_at: now
     };
-    upsertRows_("InventoryItems", [item]);
+    appendRows_("InventoryItems", [item]);
     return item;
   }, actor);
 }
@@ -66,7 +66,7 @@ function recordSupplierPriceQuote(payload, requestId, sessionToken) {
     if (quote.price_minor <= 0) {
       throw new Error("Quoted price must be greater than zero.");
     }
-    upsertRows_("SupplierPriceQuotes", [quote]);
+    appendRows_("SupplierPriceQuotes", [quote]);
     return quote;
   }, actor);
 }
@@ -118,9 +118,9 @@ function receiveStock(payload, requestId, sessionToken) {
       notes: optionalText_(payload.notes, "notes", 1000),
       created_at: nowIso_()
     };
-    upsertRows_("PurchaseReceipts", [receipt]);
-    upsertRows_("PurchaseLines", lines);
-    upsertRows_("StockMovements", lines.map(function(line) {
+    appendRows_("PurchaseReceipts", [receipt]);
+    appendRows_("PurchaseLines", lines);
+    addStockMovements_(lines.map(function(line) {
       return {
         id: line.id + "_movement",
         inventory_item_id: line.inventory_item_id,
@@ -169,7 +169,7 @@ function adjustStock(payload, requestId, sessionToken) {
       occurred_at: nowIso_(),
       notes: optionalText_(payload.notes, "notes", 1000)
     };
-    upsertRows_("StockMovements", [movement]);
+    addStockMovements_([movement]);
     return movement;
   }, actor);
 }
@@ -183,6 +183,7 @@ function getStockSnapshot(sessionToken) {
 function getPriceHistory(inventoryItemId, sessionToken) {
   requirePageAccess_(sessionToken, "stock");
   ensureSchema_();
+  preloadTables_(["InventoryItems", "Suppliers", "PurchaseLines", "PurchaseReceipts", "SupplierPriceQuotes"]);
   const item = findById_("InventoryItems", requiredText_(inventoryItemId, "stock item", 80));
   if (!item) {
     throw new Error("Stock item not found.");
@@ -226,14 +227,13 @@ function getPriceHistory(inventoryItemId, sessionToken) {
 }
 
 function getStockSnapshot_() {
-  const items = readTable_("InventoryItems");
-  const movements = readTable_("StockMovements");
+  ensureStockLevels_();
+  preloadTables_(["InventoryItems", "StockLevels"]);
   const totals = {};
-  movements.forEach(function(movement) {
-    totals[movement.inventory_item_id] =
-      (totals[movement.inventory_item_id] || 0) + Number(movement.quantity_delta_milli || 0);
+  readTable_("StockLevels").forEach(function(level) {
+    totals[level.inventory_item_id] = Number(level.on_hand_milli || 0);
   });
-  return items.filter(isActive_).map(function(item) {
+  return readTable_("InventoryItems").filter(isActive_).map(function(item) {
     const onHand = totals[item.id] || 0;
     const threshold = Number(item.low_stock_threshold_milli || 0);
     return {
@@ -247,16 +247,8 @@ function getStockSnapshot_() {
       is_low: threshold > 0 && onHand <= threshold
     };
   }).sort(function(left, right) {
-    return left.name.localeCompare(right.name);
+    return String(left.name).localeCompare(String(right.name));
   });
-}
-
-function getStockBalanceMilli_(inventoryItemId) {
-  return readTable_("StockMovements").filter(function(movement) {
-    return movement.inventory_item_id === inventoryItemId;
-  }).reduce(function(total, movement) {
-    return total + Number(movement.quantity_delta_milli || 0);
-  }, 0);
 }
 
 function getSettings_() {
@@ -293,10 +285,3 @@ function updateSettings(payload, requestId, sessionToken) {
     return getSettings_();
   }, actor);
 }
-
-function getBackupStatus_() {
-  return readTable_("BackupLog").sort(function(left, right) {
-    return String(right.created_at).localeCompare(String(left.created_at));
-  }).slice(0, 10);
-}
-

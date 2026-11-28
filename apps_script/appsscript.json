@@ -1,6 +1,14 @@
 {
   "timeZone": "Asia/Phnom_Penh",
-  "dependencies": {},
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Sheets",
+        "serviceId": "sheets",
+        "version": "v4"
+      }
+    ]
+  },
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "oauthScopes": [
@@ -8,5 +16,8 @@
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/script.scriptapp"
-  ]
+  ],
+  "executionApi": {
+    "access": "MYSELF"
+  }
 }
